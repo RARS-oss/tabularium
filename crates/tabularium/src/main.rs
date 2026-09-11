@@ -1,0 +1,508 @@
+//! tabularium: verifiable memory for LLM agents. CLI and MCP server entry point.
+
+use anyhow::{anyhow, Context, Result};
+use clap::{Args, Parser, Subcommand};
+use std::io::{IsTerminal, Read};
+use std::path::PathBuf;
+use tabularium_core::*;
+use tabularium_mcp::McpServer;
+
+#[derive(Parser)]
+#[command(name = "tabularium", version, about = "Verifiable, auditable memory for LLM agents", long_about = None)]
+struct Cli {
+    /// Vault directory (default: $TABULARIUM_VAULT or ~/.tabularium/default)
+    #[arg(long, global = true, env = "TABULARIUM_VAULT")]
+    vault: Option<PathBuf>,
+    /// Emit JSON instead of human-readable output
+    #[arg(long, global = true)]
+    json: bool,
+    #[command(subcommand)]
+    cmd: Cmd,
+}
+
+#[derive(Subcommand)]
+enum Cmd {
+    /// Create a new vault
+    Init {
+        /// Human-readable vault name
+        #[arg(long, default_value = "default")]
+        name: String,
+        /// Project root for relative check paths (default: working directory at each open)
+        #[arg(long)]
+        root: Option<PathBuf>,
+    },
+    /// Record an event (content from argument or stdin)
+    Observe {
+        /// utterance | action | observation | external
+        #[arg(long)]
+        kind: String,
+        /// external | tool | agent | user (defaults by kind)
+        #[arg(long)]
+        trust: Option<String>,
+        #[arg(long, default_value = "cli")]
+        channel: String,
+        content: Option<String>,
+    },
+    /// Derive a memory from evidence
+    Remember(RememberArgs),
+    /// Retrieve memories under a token budget
+    Recall {
+        query: Option<String>,
+        #[arg(long, default_value_t = 800)]
+        budget: u32,
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+        /// Skip validity checks
+        #[arg(long)]
+        no_verify: bool,
+        /// Drop stale items instead of demoting them
+        #[arg(long)]
+        drop_stale: bool,
+    },
+    /// Cheap probe for related memories. With no argument reads stdin (Claude Code hook JSON or raw text)
+    Hint {
+        text: Option<String>,
+        #[arg(short, default_value_t = 3)]
+        n: usize,
+    },
+    /// Run validity checks on one memory or all active ones
+    Verify { memory_id: Option<String> },
+    /// Tombstone a memory and redact its content
+    Forget {
+        memory_id: String,
+        #[arg(long, default_value = "")]
+        reason: String,
+    },
+    /// Verify the whole ledger: chain, signatures, commitments, receipts
+    Audit,
+    /// Apply pending events to the memory view (or rebuild it from genesis)
+    Compile {
+        #[arg(long)]
+        rebuild: bool,
+    },
+    /// List ledger events
+    Events {
+        #[arg(long, default_value_t = 0)]
+        after: u64,
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
+    },
+    /// List memories
+    Memories {
+        /// Include superseded and forgotten memories
+        #[arg(long)]
+        all: bool,
+    },
+    /// Show a signed receipt
+    Receipt { id: String },
+    /// Vault status
+    Info,
+    /// Serve the Model Context Protocol over stdio (creates the vault if missing)
+    Serve,
+    /// Claude Code hook entry points; reads the hook JSON from stdin, never fails the hook
+    Hook {
+        /// user-prompt (UserPromptSubmit) | post-tool (PostToolUse)
+        event: String,
+    },
+}
+
+#[derive(Args)]
+struct RememberArgs {
+    /// fact | preference | instruction | reference | note
+    #[arg(long)]
+    kind: String,
+    /// Stable key; a newer memory with the same subject supersedes the older one
+    #[arg(long)]
+    subject: Option<String>,
+    /// Evidence event id (repeatable)
+    #[arg(long = "evidence", short = 'e')]
+    evidence: Vec<String>,
+    /// file_hash check on PATH (repeatable)
+    #[arg(long = "check-file")]
+    check_file: Vec<String>,
+    /// file_exists check on PATH (repeatable)
+    #[arg(long = "check-exists")]
+    check_exists: Vec<String>,
+    /// symbol_in_file check as PATH::SYMBOL (repeatable)
+    #[arg(long = "check-symbol")]
+    check_symbol: Vec<String>,
+    /// ttl check: RFC 3339 expiry
+    #[arg(long)]
+    ttl: Option<String>,
+    #[arg(long, default_value = "cli")]
+    channel: String,
+    text: Option<String>,
+}
+
+fn read_stdin() -> Result<String> {
+    let mut s = String::new();
+    std::io::stdin().read_to_string(&mut s)?;
+    Ok(s)
+}
+
+fn text_or_stdin(arg: Option<String>) -> Result<String> {
+    match arg {
+        Some(t) => Ok(t),
+        None => {
+            if std::io::stdin().is_terminal() {
+                return Err(anyhow!("no text given and stdin is a terminal"));
+            }
+            Ok(read_stdin()?.trim_end().to_string())
+        }
+    }
+}
+
+fn open(vault_dir: &Option<PathBuf>) -> Result<Vault> {
+    let dir = Vault::resolve_dir(vault_dir.as_deref());
+    Vault::open(&dir).map_err(|e| anyhow!("{e}"))
+}
+
+fn print_json<T: serde::Serialize>(v: &T) -> Result<()> {
+    println!("{}", serde_json::to_string_pretty(v)?);
+    Ok(())
+}
+
+fn short(id: &str) -> &str {
+    &id[..id.len().min(12)]
+}
+
+fn main() -> Result<()> {
+    let cli = Cli::parse();
+    match cli.cmd {
+        Cmd::Init { name, root } => {
+            let dir = Vault::resolve_dir(cli.vault.as_deref());
+            let root_abs = match root {
+                Some(r) => Some(clean_path(&std::fs::canonicalize(&r).with_context(|| format!("root {}", r.display()))?)),
+                None => None,
+            };
+            let v = Vault::init(&dir, &name, root_abs.as_deref()).map_err(|e| anyhow!("{e}"))?;
+            if cli.json {
+                print_json(&serde_json::json!({"vault": v.dir(), "public_key": v.public_key_hex()}))?;
+            } else {
+                println!("vault created at {}", v.dir().display());
+                println!("public key {}", v.public_key_hex());
+            }
+        }
+        Cmd::Observe { kind, trust, channel, content } => {
+            let mut v = open(&cli.vault)?;
+            let kind = EventKind::parse(&kind).ok_or_else(|| anyhow!("unknown kind '{kind}'"))?;
+            let trust = match trust {
+                Some(t) => Some(Trust::parse(&t).ok_or_else(|| anyhow!("unknown trust '{t}'"))?),
+                None => None,
+            };
+            let content = text_or_stdin(content)?;
+            let ev = v.observe(ObserveInput { kind, content, trust, channel, meta: None })?;
+            if cli.json {
+                print_json(&ev)?;
+            } else {
+                println!("event {} seq {} kind {} trust {}", ev.id, ev.seq, ev.kind, ev.trust);
+            }
+        }
+        Cmd::Remember(a) => {
+            let mut v = open(&cli.vault)?;
+            let kind = MemoryKind::parse(&a.kind).ok_or_else(|| anyhow!("unknown memory kind '{}'", a.kind))?;
+            let text = text_or_stdin(a.text)?;
+            let mut checks = Vec::new();
+            for p in a.check_file {
+                checks.push(Check::FileHash { path: p, blake3: None });
+            }
+            for p in a.check_exists {
+                checks.push(Check::FileExists { path: p });
+            }
+            for s in a.check_symbol {
+                let (path, symbol) = s
+                    .split_once("::")
+                    .ok_or_else(|| anyhow!("--check-symbol expects PATH::SYMBOL, got '{s}'"))?;
+                checks.push(Check::SymbolInFile { path: path.to_string(), symbol: symbol.to_string() });
+            }
+            if let Some(exp) = a.ttl {
+                checks.push(Check::Ttl { expires: exp });
+            }
+            let m = v.remember(RememberInput {
+                kind,
+                text,
+                subject: a.subject,
+                evidence: a.evidence,
+                checks,
+                channel: a.channel,
+                trust: None,
+                meta: None,
+            })?;
+            if cli.json {
+                print_json(&m)?;
+            } else {
+                println!("memory {} kind {} trust {} checks {} evidence {}", m.id, m.kind, m.trust, m.checks.len(), m.evidence.len());
+            }
+        }
+        Cmd::Recall { query, budget, limit, no_verify, drop_stale } => {
+            let v = open(&cli.vault)?;
+            let query = query.unwrap_or_default();
+            let opts = RecallOptions { budget_tokens: budget, limit, verify: !no_verify, include_stale: !drop_stale };
+            let r = v.recall(&query, &opts)?;
+            if cli.json {
+                print_json(&r)?;
+            } else {
+                println!(
+                    "{} of {} matched, {} returned, {}/{} tokens, {} skipped for budget, receipt {}",
+                    r.matched,
+                    r.considered,
+                    r.items.len(),
+                    r.used_tokens,
+                    r.budget_tokens,
+                    r.skipped_for_budget.len(),
+                    short(&r.receipt.id)
+                );
+                for it in &r.items {
+                    let subj = it.subject.as_deref().map(|s| format!(" [{s}]")).unwrap_or_default();
+                    println!("- ({}) {} {}{} :: {}", it.status, it.kind, it.trust, subj, it.text);
+                    println!("    {} · {} · {}", short(&it.id), it.tokens, it.why);
+                }
+            }
+        }
+        Cmd::Hint { text, n } => {
+            let v = open(&cli.vault)?;
+            let raw = match text {
+                Some(t) => t,
+                None => {
+                    if std::io::stdin().is_terminal() {
+                        return Err(anyhow!("no text given and stdin is a terminal"));
+                    }
+                    read_stdin()?
+                }
+            };
+            // Claude Code hooks pass JSON with a "prompt" field; accept raw text too.
+            let text = serde_json::from_str::<serde_json::Value>(&raw)
+                .ok()
+                .and_then(|j| j.get("prompt").and_then(|p| p.as_str()).map(|s| s.to_string()))
+                .unwrap_or(raw);
+            let h = v.hint(&text, n)?;
+            if cli.json {
+                print_json(&h)?;
+            } else if h.matched > 0 {
+                let titles: Vec<String> = h.items.iter().map(|i| format!("\"{}\" ({})", i.title, short(&i.id))).collect();
+                println!(
+                    "Tabularium: {} related memor{} — {}. Call memory_recall to load them.",
+                    h.matched,
+                    if h.matched == 1 { "y" } else { "ies" },
+                    titles.join("; ")
+                );
+            }
+        }
+        Cmd::Verify { memory_id } => {
+            let v = open(&cli.vault)?;
+            let reports = v.verify(memory_id.as_deref())?;
+            if cli.json {
+                let items: Vec<serde_json::Value> = reports
+                    .iter()
+                    .map(|(m, s, c)| serde_json::json!({"memory_id": m.id, "status": s, "text": m.text, "checks": c}))
+                    .collect();
+                print_json(&items)?;
+            } else {
+                for (m, s, c) in &reports {
+                    println!("({}) {} :: {}", s, short(&m.id), m.text);
+                    for r in c {
+                        if let CheckOutcome::Fail { reason } | CheckOutcome::Error { reason } = &r.outcome {
+                            println!("    {reason}");
+                        }
+                    }
+                }
+                let stale = reports.iter().filter(|(_, s, _)| *s == Status::Stale).count();
+                println!("{} checked, {} stale", reports.len(), stale);
+            }
+        }
+        Cmd::Forget { memory_id, reason } => {
+            let mut v = open(&cli.vault)?;
+            let ev = v.forget(&memory_id, &reason, "cli")?;
+            if cli.json {
+                print_json(&ev)?;
+            } else {
+                println!("forgotten {} (tombstone event {})", short(&memory_id), short(&ev.id));
+            }
+        }
+        Cmd::Audit => {
+            let v = open(&cli.vault)?;
+            let a = v.audit()?;
+            if cli.json {
+                print_json(&a)?;
+            } else {
+                println!(
+                    "{}: {} events, {} receipts, head {}@{}",
+                    if a.ok { "OK" } else { "FAILED" },
+                    a.events,
+                    a.receipts,
+                    a.head_seq,
+                    short(&a.head_hash)
+                );
+                for p in &a.problems {
+                    println!("  ! {p}");
+                }
+            }
+            if !a.ok {
+                std::process::exit(2);
+            }
+        }
+        Cmd::Compile { rebuild } => {
+            let mut v = open(&cli.vault)?;
+            let r = v.compile(rebuild)?;
+            if cli.json {
+                print_json(&r)?;
+            } else {
+                println!(
+                    "{} {} events (seq {}..{}), {} active / {} total memories",
+                    if r.rebuilt { "rebuilt from" } else { "applied" },
+                    r.applied,
+                    r.from_seq + 1,
+                    r.to_seq,
+                    r.memories_active,
+                    r.memories_total
+                );
+            }
+        }
+        Cmd::Events { after, limit } => {
+            let v = open(&cli.vault)?;
+            let evs = v.events(after, limit)?;
+            if cli.json {
+                print_json(&evs)?;
+            } else {
+                for e in &evs {
+                    let summary = match &e.payload {
+                        None => "<redacted>".to_string(),
+                        Some(p) => {
+                            let s = p.get("content").or_else(|| p.get("text")).and_then(|x| x.as_str()).unwrap_or("");
+                            s.lines().next().unwrap_or("").chars().take(70).collect()
+                        }
+                    };
+                    println!("{:>5} {} {:<11} {:<8} {:<10} {}", e.seq, short(&e.id), e.kind.as_str(), e.trust.as_str(), e.channel, summary);
+                }
+            }
+        }
+        Cmd::Memories { all } => {
+            let v = open(&cli.vault)?;
+            let ms = v.memories(all)?;
+            if cli.json {
+                print_json(&ms)?;
+            } else {
+                for m in &ms {
+                    let state = if m.tombstoned {
+                        "forgotten"
+                    } else if m.superseded_by.is_some() {
+                        "superseded"
+                    } else {
+                        "active"
+                    };
+                    let subj = m.subject.as_deref().map(|s| format!(" [{s}]")).unwrap_or_default();
+                    println!("{} {:<11} {:<8} {:<10}{} :: {}", short(&m.id), m.kind.as_str(), m.trust.as_str(), state, subj, m.text);
+                }
+                println!("{} memories", ms.len());
+            }
+        }
+        Cmd::Receipt { id } => {
+            let v = open(&cli.vault)?;
+            let r = v.get_receipt(&id)?.ok_or_else(|| anyhow!("receipt '{id}' not found"))?;
+            print_json(&r)?;
+        }
+        Cmd::Info => {
+            let v = open(&cli.vault)?;
+            let (seq, hash) = v.head()?;
+            let a = v.memories(false)?.len();
+            let t = v.memories(true)?.len();
+            if cli.json {
+                print_json(&serde_json::json!({
+                    "vault": v.dir(), "root": v.root(), "name": v.config().name, "events": v.event_count()?,
+                    "head": {"seq": seq, "hash": hash}, "memories": {"active": a, "total": t},
+                    "public_key": v.public_key_hex(), "version": tabularium_core::VERSION
+                }))?;
+            } else {
+                println!("vault     {}", v.dir().display());
+                println!("root      {}", v.root().display());
+                println!("events    {} (head {}@{})", v.event_count()?, seq, short(&hash));
+                println!("memories  {a} active / {t} total");
+                println!("pubkey    {}", v.public_key_hex());
+            }
+        }
+        Cmd::Serve => {
+            let dir = Vault::resolve_dir(cli.vault.as_deref());
+            let vault = if Vault::exists(&dir) {
+                Vault::open(&dir).map_err(|e| anyhow!("{e}"))?
+            } else {
+                eprintln!("[tabularium] creating vault at {}", dir.display());
+                Vault::init(&dir, "default", None).map_err(|e| anyhow!("{e}"))?
+            };
+            eprintln!("[tabularium] serving MCP over stdio; vault {}; root {}", vault.dir().display(), vault.root().display());
+            let mut server = McpServer::new(vault);
+            server.run_stdio()?;
+        }
+        Cmd::Hook { event } => {
+            // Hooks must never break the agent: swallow errors, exit 0, print nothing on failure.
+            if let Err(e) = run_hook(&cli.vault, &event) {
+                eprintln!("[tabularium hook] {e}");
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Strip Windows' verbatim prefix (`\\?\C:\...`) that `canonicalize` produces; keeps paths readable.
+fn clean_path(p: &std::path::Path) -> PathBuf {
+    let s = p.to_string_lossy();
+    match s.strip_prefix(r"\\?\") {
+        Some(rest) => PathBuf::from(rest),
+        None => p.to_path_buf(),
+    }
+}
+
+fn run_hook(vault_dir: &Option<PathBuf>, event: &str) -> Result<()> {
+    let raw = read_stdin()?;
+    let input: serde_json::Value = match serde_json::from_str(&raw) {
+        Ok(v) => v,
+        Err(e) => {
+            if event != "user-prompt" {
+                return Err(anyhow!("stdin is not valid hook JSON: {e}"));
+            }
+            serde_json::Value::Null
+        }
+    };
+    let dir = Vault::resolve_dir(vault_dir.as_deref());
+    if !Vault::exists(&dir) {
+        return Ok(());
+    }
+    let mut v = Vault::open(&dir).map_err(|e| anyhow!("{e}"))?;
+    if let Some(cwd) = input.get("cwd").and_then(|c| c.as_str()) {
+        v.set_root(PathBuf::from(cwd));
+    }
+    match event {
+        "user-prompt" => {
+            let prompt = input.get("prompt").and_then(|p| p.as_str()).unwrap_or(raw.as_str());
+            let h = v.hint(prompt, 3)?;
+            if h.matched > 0 {
+                let titles: Vec<String> = h.items.iter().map(|i| format!("\"{}\" ({})", i.title, short(&i.id))).collect();
+                println!(
+                    "Tabularium: {} related memor{} — {}. Call memory_recall to load them.",
+                    h.matched,
+                    if h.matched == 1 { "y" } else { "ies" },
+                    titles.join("; ")
+                );
+            }
+        }
+        "post-tool" => {
+            let tool = input.get("tool_name").and_then(|t| t.as_str()).unwrap_or("tool");
+            let Some(path) = input.pointer("/tool_input/file_path").and_then(|p| p.as_str()) else {
+                return Ok(());
+            };
+            let hash = std::fs::read(path).ok().map(|b| tabularium_core::canon::blake3_hex(&b));
+            let content = match &hash {
+                Some(h) => format!("{tool} touched {path} (blake3 {})", &h[..12]),
+                None => format!("{tool} touched {path}"),
+            };
+            v.observe(ObserveInput {
+                kind: EventKind::Observation,
+                content,
+                trust: Some(Trust::Tool),
+                channel: "hook:PostToolUse".into(),
+                meta: Some(serde_json::json!({"tool_name": tool, "file_path": path, "blake3": hash})),
+            })?;
+        }
+        other => return Err(anyhow!("unknown hook event '{other}' (expected user-prompt | post-tool)")),
+    }
+    Ok(())
+}

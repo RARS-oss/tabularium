@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 65155c7088a7834d4749ed92e8f4374a578b298f11c80a95bf04792c9880a378 # shrinks to ops = [Remember { kind: 3, evidence: [], subject: None, text: "a" }, Forget { idx: 0 }]
+cc e3cb3a569a7119f1df1ab5757386a9a998c5975db27317b732fc6d4d3966cf27 # shrinks to ops = [Remember { kind: 3, evidence: [], subject: None, text: "a" }, Observe { kind: 0, trust: 3, content: "a" }, Remember { kind: 0, evidence: [], subject: None, text: "a" }, Remember { kind: 0, evidence: [], subject: Some(2), text: "lbpmply wy ixxjk on iwddhqcf" }, Remember { kind: 0, evidence: [24, 6, 20], subject: Some(2), text: "kxzicl c" }, Remember { kind: 3, evidence: [19, 15], subject: Some(2), text: "dlgy gdc xvkuqq telhcwe" }, Remember { kind: 4, evidence: [9, 27], subject: None, text: "hcnlq jhihwcgz risf dtgpokfm bnir utvh h" }, Remember { kind: 0, evidence: [20, 31, 21], subject: None, text: "eeja swppy lea szpvlzom k" }, Observe { kind: 0, trust: 2, content: "nlint n c vh" }, Observe { kind: 2, trust: 3, content: "doau qptufje" }, Remember { kind: 0, evidence: [], subject: None, text: "ifw vtq itw mrfhovc wye ntrvm pqw bcklk" }, Remember { kind: 3, evidence: [26, 1, 3], subject: Some(2), text: "ksmv ajndpju fnb jvbkztg ldlxbxvk mggsq bi n" }, Forget { idx: 21 }]

@@ -1,0 +1,86 @@
+# tabularium — design
+
+## 1. Problem
+
+Agent memory systems (Mem0, Zep/Graphiti, Letta, LangMem, file-based memories in coding CLIs) share one
+architecture: an LLM extracts "facts" into a mutable store, and retrieval pastes them back into context.
+Four failures follow from that architecture, not from any particular implementation:
+
+1. **Silent staleness.** A memory has no notion of what would make it false. Renamed function, moved
+   file, changed config: the memory is still confidently served.
+2. **Poisoning.** Everything in the store is treated as equally trustworthy. Content the agent merely
+   *read* (a README, a web page, a tool output) becomes indistinguishable from what the *user said*.
+   Memory-injection attacks (AgentPoison, MINJA) exploit exactly this.
+3. **Irreproducibility.** Extraction and retrieval are non-deterministic LLM calls. Nobody can replay
+   why the agent knew X at time T.
+4. **No budget.** Memory competes with the task for context tokens with no accounting and no
+   explanation of what was dropped.
+
+## 2. Model
+
+### 2.1 Ledger
+An append-only log of **events**. Each event has `seq`, `ts`, `channel`, `kind`, `trust`,
+`payload_hash`, `prev_hash`, `hash = BLAKE3(domain || fields)`, `sig = Ed25519(hash)`. The chain
+commits to `payload_hash`, not the payload, so a payload can later be **redacted** (forget) without
+breaking the chain. SQLite triggers make the table append-only; only `payload := NULL` is permitted.
+
+Event kinds: `utterance` (user), `action` (agent), `observation` (tool output), `external` (imported),
+`derive` (remember), `forget` (tombstone).
+
+### 2.2 Trust
+`external < tool < agent < user`, assigned at ingestion by the channel that ingested it, capped per
+channel by vault policy, never raised. A derived memory's trust is `min(trust of evidence)`, or the
+recorder's own trust when it cites nothing. Memory kinds `preference` and `instruction` (the ones that
+can steer behaviour) require trust `user`, i.e. *all* evidence must be user utterances. The rule is
+enforced before anything touches the ledger and re-checked on replay.
+
+This is a structural claim, not a prompt: no sequence of untrusted inputs can produce an instruction.
+The residual risk is a recorder that mislabels trust (an agent claiming a tool output was a user
+utterance). That is why events carry a `channel`, why hooks that observe the real user prompt run
+outside the model, and why the policy can cap what the `mcp:*` channels may assert.
+
+### 2.3 Compile
+`memories = compile(ledger)`. A pure, order-dependent fold over events: `derive` inserts a memory
+(superseding an older one with the same `subject`), `forget` collapses it to a canonical tombstone
+stub. The view is persisted and advanced incrementally; `compile --rebuild` replays from genesis and
+must yield the same bytes. This is asserted by property tests on random operation sequences.
+
+The LLM never runs inside compile. Whatever an LLM concluded is itself an event (`derive` carries the
+text), so non-determinism is quarantined in the log.
+
+### 2.4 Verify
+Memories carry declarative **checks**: `file_exists`, `file_hash` (BLAKE3 baked at remember time),
+`symbol_in_file`, `ttl`. At recall, checks run against the real filesystem/clock and fold into a status:
+`fresh` (all pass), `stale` (any fail), `unverified` (no checks, or a check errored). Stale memories are
+demoted and annotated with the reason, not hidden: the agent learns *that* the world changed.
+
+### 2.5 Recall
+Exact BM25 over active memories (no ANN, no floating-point races across machines), then
+`score = bm25 × status_factor × trust_factor`, ties broken by recency, then a greedy knapsack under a
+token budget using a conservative token estimator. Each item carries a `why` string. The result is
+hashed and signed into a **receipt** that pins the ledger head, the query hash and the policy.
+
+Planned: embeddings computed once at ingest and stored as derived events, so hybrid recall stays
+deterministic across CPUs.
+
+## 3. Claims for the paper
+
+- **H1 (staleness).** On a benchmark where the world drifts (files renamed, configs changed) the
+  fraction of stale facts served as fresh drops from baseline levels to ~0 with checks, at no loss on
+  the unchanged subset.
+- **H2 (injection).** On an adversarial suite of memory-injection attacks, success rate is 0% by
+  construction, versus non-trivial rates for extraction-based systems.
+- **H3 (parity).** On LongMemEval and LoCoMo, with a reference extractor in the harness, recall quality
+  is within CI of the strongest baseline at equal token budget.
+- **H4 (reproducibility).** 100% identical recalls across runs and machines; baselines measured.
+
+## 4. Roadmap
+
+1. **Week 1 (done):** ledger, keys, compile, verify, recall, receipts, MCP stdio server, CLI, property tests.
+2. **Week 2:** stored embeddings + hybrid ranking; contradiction detection on `subject`; hooks that
+   record file reads as evidence; `roots` support in MCP.
+3. **Week 3:** consolidation (dedup, merge) as explicit logged operations; shared vaults with
+   per-key trust; `redact` of source events.
+4. **Week 4:** Python eval harness, baselines, benchmarks for staleness and injection, paper skeleton.
+5. **Later:** GUI timeline ("what did the agent know at T"), HTTP transport, sampling-based
+   extraction through the host.

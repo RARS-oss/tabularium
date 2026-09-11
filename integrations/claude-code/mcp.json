@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "tabularium": {
+      "command": "tabularium",
+      "args": ["serve"]
+    }
+  }
+}
