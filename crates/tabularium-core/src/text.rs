@@ -2,13 +2,50 @@
 //!
 //! Everything here is a pure function of its inputs. No randomness, no locale, no time.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::LazyLock;
 
 pub const BM25_K1: f64 = 1.2;
 pub const BM25_B: f64 = 0.75;
 
-/// Lowercase alphanumeric runs (Unicode-aware). Tokens shorter than two chars are dropped
-/// unless they are digits.
+/// Function words that carry no retrieval signal. Without this list every query containing
+/// "the" or "в" matches every memory, which floods hints on small vaults.
+const STOPWORDS: &[&str] = &[
+    // English
+    "a", "an", "the", "and", "or", "but", "if", "then", "else", "of", "to", "in", "on", "at", "by",
+    "for", "with", "about", "as", "is", "are", "was", "were", "be", "been", "being", "it", "its",
+    "this", "that", "these", "those", "i", "you", "he", "she", "we", "they", "me", "him", "her",
+    "us", "them", "my", "your", "his", "our", "their", "do", "does", "did", "doing", "have", "has",
+    "had", "not", "no", "so", "than", "too", "very", "can", "could", "will", "would", "should",
+    "may", "might", "must", "shall", "from", "into", "over", "under", "up", "down", "out", "off",
+    "again", "once", "here", "there", "when", "where", "why", "how", "what", "which", "who", "whom",
+    "all", "any", "both", "each", "few", "more", "most", "other", "some", "such", "only", "own",
+    "same", "just", "now", "also", "get", "got", "want", "like", "thing", "things", "let", "lets",
+    "please", "via", "per", "etc",
+    // Russian
+    "и", "в", "во", "не", "что", "он", "на", "я", "с", "со", "как", "а", "то", "все", "всё", "она",
+    "так", "его", "но", "да", "ты", "к", "у", "же", "вы", "за", "бы", "по", "только", "ее", "её",
+    "мне", "было", "вот", "от", "меня", "еще", "ещё", "нет", "о", "из", "ему", "теперь", "когда",
+    "даже", "ну", "ли", "если", "уже", "или", "ни", "быть", "был", "него", "до", "вас", "нибудь",
+    "уж", "вам", "ведь", "там", "потом", "себя", "ничего", "ей", "может", "они", "тут", "где",
+    "есть", "надо", "ней", "для", "мы", "тебя", "их", "чем", "была", "сам", "чтоб", "без", "чего",
+    "раз", "тоже", "себе", "под", "будет", "ж", "тогда", "кто", "этот", "того", "потому", "этого",
+    "какой", "совсем", "ним", "здесь", "этом", "один", "почти", "мой", "тем", "чтобы", "нее",
+    "сейчас", "были", "куда", "зачем", "всех", "никогда", "можно", "при", "об", "другой", "хоть",
+    "после", "над", "больше", "тот", "через", "эти", "нас", "про", "всего", "них", "какая", "много",
+    "эту", "моя", "свою", "этой", "перед", "лучше", "том", "нельзя", "такой", "им", "более",
+    "всегда", "конечно", "всю", "между", "давай", "давайте", "бро", "типа", "типо", "прям", "вообще",
+    "просто", "это", "эта", "эти", "тебе", "мной", "тобой", "нам", "вами",
+];
+
+static STOPWORD_SET: LazyLock<HashSet<&'static str>> = LazyLock::new(|| STOPWORDS.iter().copied().collect());
+
+pub fn is_stopword(token: &str) -> bool {
+    STOPWORD_SET.contains(token)
+}
+
+/// Lowercase alphanumeric runs (Unicode-aware), minus stopwords. Tokens shorter than two chars
+/// are dropped unless they are digits.
 pub fn tokenize(text: &str) -> Vec<String> {
     let mut tokens = Vec::new();
     let mut cur = String::new();
@@ -29,7 +66,7 @@ pub fn tokenize(text: &str) -> Vec<String> {
 
 fn push_token(tokens: &mut Vec<String>, tok: String) {
     let n = tok.chars().count();
-    if n >= 2 || tok.chars().all(|c| c.is_ascii_digit()) {
+    if (n >= 2 || tok.chars().all(|c| c.is_ascii_digit())) && !is_stopword(&tok) {
         tokens.push(tok);
     }
 }
@@ -152,6 +189,14 @@ mod tests {
     fn tokenizer_handles_unicode_and_code() {
         assert_eq!(tokenize("Hello, World! foo_bar x1 a"), vec!["hello", "world", "foo_bar", "x1"]);
         assert_eq!(tokenize("Привет, Мир"), vec!["привет", "мир"]);
+    }
+
+    #[test]
+    fn tokenizer_drops_stopwords_in_both_languages() {
+        assert_eq!(tokenize("how does the ledger hash things"), vec!["ledger", "hash"]);
+        assert_eq!(tokenize("давай допилим MCP сервер, бро"), vec!["допилим", "mcp", "сервер"]);
+        assert!(tokenize("the of and в на").is_empty());
+        assert_eq!(tokenize("port 8080"), vec!["port", "8080"]);
     }
 
     #[test]
