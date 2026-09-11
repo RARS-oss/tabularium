@@ -1,6 +1,7 @@
 //! Compile memories from the ledger. A pure, replayable function of the event sequence.
 
-use crate::canon::canonical_json;
+use crate::canon::{blake3_hex, canonical_json};
+use crate::embed::{decode_vector, vector_from_bytes, vector_to_bytes};
 use crate::error::{Error, Result};
 use crate::ledger::{derive_trust, row_to_event, EVENT_COLS};
 use crate::types::*;
@@ -121,6 +122,36 @@ fn apply_event(tx: &Transaction<'_>, ev: &Event) -> Result<()> {
                  WHERE id = ?1",
                 [&f.memory_id],
             )?;
+            tx.execute("DELETE FROM embeddings WHERE memory_id = ?1", [&f.memory_id])?;
+        }
+        EventKind::Embed => {
+            let Some(payload) = &ev.payload else { return Ok(()) };
+            let e: EmbedPayload = serde_json::from_value(payload.clone())
+                .map_err(|err| Error::Integrity(format!("event {}: bad embed payload: {err}", ev.seq)))?;
+            let vector = decode_vector(&e.vector_hex)
+                .map_err(|err| Error::Integrity(format!("event {}: {err}", ev.seq)))?;
+            if vector.len() != e.dim {
+                return Err(Error::Integrity(format!(
+                    "event {}: embed dim {} does not match vector length {}",
+                    ev.seq,
+                    e.dim,
+                    vector.len()
+                )));
+            }
+            // Only live memories carry vectors; a forgotten memory's vector would leak its content.
+            let live: bool = tx
+                .query_row(
+                    "SELECT COUNT(*) FROM memories WHERE id = ?1 AND tombstoned = 0",
+                    [&e.memory_id],
+                    |r| r.get::<_, i64>(0),
+                )
+                .map(|n| n > 0)?;
+            if live {
+                tx.execute(
+                    "INSERT OR REPLACE INTO embeddings (memory_id, model, dim, vector) VALUES (?1, ?2, ?3, ?4)",
+                    params![e.memory_id, e.model, e.dim as i64, vector_to_bytes(&vector)],
+                )?;
+            }
         }
         _ => {}
     }
@@ -139,6 +170,7 @@ impl Vault {
             .unwrap_or(0);
         if rebuild {
             tx.execute("DELETE FROM memories", [])?;
+            tx.execute("DELETE FROM embeddings", [])?;
             from = 0;
         }
         let mut applied: u64 = 0;
@@ -203,10 +235,72 @@ impl Vault {
         Ok(out)
     }
 
-    /// Canonical JSON of the full memories view. Two vaults with the same ledger must produce the
-    /// same snapshot; incremental and rebuilt compiles must too.
+    /// Canonical JSON of the full derived view (memories and embeddings). Two vaults with the same
+    /// ledger must produce the same snapshot; incremental and rebuilt compiles must too.
     pub fn snapshot(&self) -> Result<String> {
-        let all = self.memories(true)?;
-        Ok(canonical_json(&serde_json::to_value(&all)?))
+        let memories = self.memories(true)?;
+        let mut stmt = self.conn.prepare("SELECT memory_id, model, dim, vector FROM embeddings ORDER BY memory_id")?;
+        let rows = stmt.query_map([], |r| {
+            Ok(serde_json::json!({
+                "memory_id": r.get::<_, String>(0)?,
+                "model": r.get::<_, String>(1)?,
+                "dim": r.get::<_, i64>(2)?,
+                "vector_blake3": blake3_hex(&r.get::<_, Vec<u8>>(3)?),
+            }))
+        })?;
+        let mut embeddings = Vec::new();
+        for r in rows {
+            embeddings.push(r?);
+        }
+        Ok(canonical_json(&serde_json::json!({"memories": memories, "embeddings": embeddings})))
+    }
+
+    /// Stored vectors for active memories under `model`, keyed by memory id.
+    pub fn embeddings_for_active(&self, model: &str) -> Result<Vec<(String, Vec<f32>)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT e.memory_id, e.vector FROM embeddings e
+             JOIN memories m ON m.id = e.memory_id
+             WHERE e.model = ?1 AND m.tombstoned = 0 AND m.superseded_by IS NULL
+             ORDER BY m.seq ASC",
+        )?;
+        let rows = stmt.query_map([model], |r| Ok((r.get::<_, String>(0)?, vector_from_bytes(&r.get::<_, Vec<u8>>(1)?))))?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    /// Active memories that have no stored vector under `model`.
+    pub fn memories_missing_embedding(&self, model: &str) -> Result<Vec<Memory>> {
+        let sql = format!(
+            "SELECT {MEMORY_COLS} FROM memories m
+             WHERE m.tombstoned = 0 AND m.superseded_by IS NULL
+               AND NOT EXISTS (SELECT 1 FROM embeddings e WHERE e.memory_id = m.id AND e.model = ?1)
+             ORDER BY m.seq ASC"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map([model], row_to_memory)?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    /// (memories with a vector under `model`, active memories).
+    pub fn embedding_coverage(&self, model: &str) -> Result<(usize, usize)> {
+        let covered: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM embeddings e JOIN memories m ON m.id = e.memory_id
+             WHERE e.model = ?1 AND m.tombstoned = 0 AND m.superseded_by IS NULL",
+            [model],
+            |r| r.get(0),
+        )?;
+        let active: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM memories WHERE tombstoned = 0 AND superseded_by IS NULL",
+            [],
+            |r| r.get(0),
+        )?;
+        Ok((covered as usize, active as usize))
     }
 }

@@ -204,6 +204,11 @@ pub fn tool_definitions() -> Vec<Value> {
             }
         }),
         json!({
+            "name": "memory_embed",
+            "description": "Backfill vectors for memories that have none under the current embedding model (vectors are stored in the ledger once, so recall stays reproducible). Reports coverage.",
+            "inputSchema": {"type": "object", "properties": {}}
+        }),
+        json!({
             "name": "memory_info",
             "description": "Vault location, project root, ledger head, counts and public key.",
             "inputSchema": {"type": "object", "properties": {}}
@@ -385,6 +390,7 @@ impl McpServer {
                     "matched": r.matched,
                     "returned": r.items.len(),
                     "stale": stale,
+                    "semantic_model": r.semantic_model,
                     "skipped_for_budget": r.skipped_for_budget.len(),
                     "items": r.items.iter().map(|it| recall_item_json(it, false)).collect::<Vec<_>>(),
                     "receipt_id": r.receipt.id,
@@ -431,6 +437,7 @@ impl McpServer {
                 Ok(json!({"total": total, "items": items}))
             }
             "memory_audit" => Ok(serde_json::to_value(self.vault.audit()?)?),
+            "memory_embed" => Ok(serde_json::to_value(self.vault.embed_missing()?)?),
             "memory_receipt" => {
                 let id = require_str(args, "id")?;
                 let r = self.vault.get_receipt(id)?.ok_or_else(|| Error::NotFound(format!("receipt '{id}'")))?;
@@ -440,6 +447,13 @@ impl McpServer {
                 let (seq, hash) = self.vault.head()?;
                 let active = self.vault.memories(false)?.len();
                 let total = self.vault.memories(true)?.len();
+                let embeddings = match self.vault.embedding_model_id() {
+                    Some(model) => {
+                        let (covered, _) = self.vault.embedding_coverage(&model)?;
+                        json!({"model": model, "covered": covered, "active": active})
+                    }
+                    None => json!({"model": null, "covered": 0, "active": active}),
+                };
                 Ok(json!({
                     "vault": self.vault.dir().display().to_string(),
                     "root": self.vault.root().display().to_string(),
@@ -447,6 +461,7 @@ impl McpServer {
                     "events": self.vault.event_count()?,
                     "head": {"seq": seq, "hash": hash},
                     "memories": {"active": active, "total": total},
+                    "embeddings": embeddings,
                     "public_key": self.vault.public_key_hex(),
                     "channel": self.channel,
                     "protocol": self.protocol,
@@ -480,7 +495,8 @@ mod tests {
 
     fn server() -> (tempfile::TempDir, McpServer) {
         let dir = tempfile::tempdir().unwrap();
-        let v = Vault::init(&dir.path().join("v"), "t", Some(dir.path())).unwrap();
+        let mut v = Vault::init(&dir.path().join("v"), "t", Some(dir.path())).unwrap();
+        v.set_embedder(None);
         (dir, McpServer::new(v))
     }
 

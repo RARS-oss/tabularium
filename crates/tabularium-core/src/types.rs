@@ -77,6 +77,8 @@ pub enum EventKind {
     Derive,
     /// A tombstone ("forget"). Payload: [`ForgetPayload`].
     Forget,
+    /// A stored embedding vector for a memory. Payload: [`EmbedPayload`].
+    Embed,
 }
 
 impl EventKind {
@@ -88,6 +90,7 @@ impl EventKind {
             EventKind::External => "external",
             EventKind::Derive => "derive",
             EventKind::Forget => "forget",
+            EventKind::Embed => "embed",
         }
     }
 
@@ -99,6 +102,7 @@ impl EventKind {
             "external" => Some(EventKind::External),
             "derive" => Some(EventKind::Derive),
             "forget" => Some(EventKind::Forget),
+            "embed" => Some(EventKind::Embed),
             _ => None,
         }
     }
@@ -110,12 +114,12 @@ impl EventKind {
             EventKind::Action => Trust::Agent,
             EventKind::Observation => Trust::Tool,
             EventKind::External => Trust::External,
-            EventKind::Derive | EventKind::Forget => Trust::Agent,
+            EventKind::Derive | EventKind::Forget | EventKind::Embed => Trust::Agent,
         }
     }
 
     pub fn is_observation(self) -> bool {
-        !matches!(self, EventKind::Derive | EventKind::Forget)
+        !matches!(self, EventKind::Derive | EventKind::Forget | EventKind::Embed)
     }
 }
 
@@ -235,6 +239,15 @@ pub struct ForgetPayload {
     pub memory_id: String,
     #[serde(default)]
     pub reason: String,
+}
+
+/// Payload of an [`EventKind::Embed`] event. The vector is hex of little-endian f32.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EmbedPayload {
+    pub memory_id: String,
+    pub model: String,
+    pub dim: usize,
+    pub vector_hex: String,
 }
 
 /// Payload of an observation-type event.

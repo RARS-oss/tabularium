@@ -11,7 +11,8 @@ noticing, they can be poisoned by anything the agent reads, and nobody can repro
 |---|---|
 | **Never lies silently** | Every memory carries evidence ids and validity checks (file hash, symbol present, TTL). Checks are re-run at recall time; a memory whose world has changed comes back marked `stale`, with the reason. |
 | **Cannot be poisoned into instructions** | Trust is attached at ingestion (`external < tool < agent < user`) and never rises. A memory's trust is the weakest of its evidence. `preference` and `instruction` memories are rejected unless every piece of evidence is a user utterance. Enforced by construction, tested by fuzzing. |
-| **Reproducible** | The only source of truth is an append-only, hash-chained, Ed25519-signed event ledger. The memory view is a pure function of it: incremental compilation and a full rebuild are byte-identical, and tests assert it. Recall uses exact lexical ranking with fixed tie-breaks. |
+| **Reproducible** | The only source of truth is an append-only, hash-chained, Ed25519-signed event ledger. The memory view is a pure function of it: incremental compilation and a full rebuild are byte-identical, and tests assert it. Recall uses exact BM25 plus exact cosine over vectors that are computed once and stored in the ledger, fused by reciprocal rank with fixed tie-breaks. |
+| **Cross-language** | A multilingual embedding model runs locally through ONNX (statically linked, downloaded once to `~/.tabularium/models`). Ask in Russian, find what was saved in English. Without the model the engine degrades to lexical recall and says so. |
 | **Budgeted and explainable** | Recall packs memories under a token budget and tells you why each item ranked where it did. |
 | **Auditable** | Every recall yields a signed receipt: ledger head, query hash, policy, exactly which items were handed over. `tabularium audit` verifies the whole chain. |
 | **LLM-free core** | The host agent does the thinking. The engine keeps it honest. No keys, no network. |
@@ -57,13 +58,18 @@ tabularium recall "how do we deploy" --budget 400
 tabularium verify              # which memories went stale?
 tabularium audit               # chain, signatures, commitments, receipts
 tabularium compile --rebuild   # replay the ledger from genesis; must equal the incremental view
+tabularium embed               # write vectors for memories that have none (first run downloads the model)
 ```
+
+Embeddings are on by default (`[embeddings]` in `vault.toml`: `enabled`, `model`, `threshold`, `cache_dir`).
+Set `TABULARIUM_NO_EMBED=1` to force lexical-only for a process; hooks always run lexical-only.
 
 ## Guarantees under test
 
 - `cargo test` runs unit, integration and property tests (proptest):
   - **trust monotonicity**: random operation sequences never yield a steering memory with non-user evidence;
-  - **determinism**: incremental view == rebuilt view; a copied vault recalls identically;
+  - **determinism**: incremental view == rebuilt view, vectors included; a copied vault recalls identically;
+  - **redaction**: forgetting a memory redacts its text and its vector, and the chain still audits;
   - **integrity**: any altered byte in the ledger fails `audit`; the SQLite triggers make the table append-only;
   - **budget**: recall never exceeds its token budget.
 
@@ -80,7 +86,7 @@ evals/                   benchmark harness (Python), coming
 
 ## Status
 
-v0.1: week-one core. See `docs/DESIGN.md` for the roadmap: embeddings (stored in the ledger, so recall
-stays deterministic across machines), consolidation, shared vaults with per-key trust, GUI timeline.
+v0.2: core plus stored embeddings and hybrid recall. See `docs/DESIGN.md` for the roadmap: consolidation,
+git-aware checks, shared vaults with per-key trust, GUI timeline.
 
 License: MIT OR Apache-2.0.

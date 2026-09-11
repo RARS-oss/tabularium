@@ -32,6 +32,19 @@ pub struct RememberInput {
     pub meta: Option<Value>,
 }
 
+/// Result of a backfill of missing vectors.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EmbedReport {
+    /// `None` when embeddings are unavailable in this process.
+    pub model: Option<String>,
+    pub embedded: usize,
+    pub covered: usize,
+    pub active: usize,
+}
+
+/// Ingestion channel used for embed events written by the engine itself.
+pub const EMBED_CHANNEL: &str = "embedder";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuditReport {
     pub ok: bool,
@@ -202,10 +215,49 @@ impl Vault {
             checks,
             meta: input.meta,
         })?;
+        let text_for_embedding = payload["text"].as_str().unwrap_or_default().to_string();
         let ev = self.append_event(&channel, EventKind::Derive, recorder, payload)?;
+        if let Some((model, mut vectors)) = self.embed_texts(&[text_for_embedding.as_str()])
+            && let Some(vector) = vectors.pop()
+        {
+            self.append_embed_event(&ev.id, &model, &vector)?;
+        }
         self.compile(false)?;
         self.get_memory(&ev.id)?
             .ok_or_else(|| Error::Integrity("derived memory missing after compile".into()))
+    }
+
+    fn append_embed_event(&mut self, memory_id: &str, model: &str, vector: &[f32]) -> Result<Event> {
+        let payload = serde_json::to_value(EmbedPayload {
+            memory_id: memory_id.to_string(),
+            model: model.to_string(),
+            dim: vector.len(),
+            vector_hex: crate::embed::encode_vector(vector),
+        })?;
+        self.append_event(EMBED_CHANNEL, EventKind::Embed, Trust::Agent, payload)
+    }
+
+    /// Write vectors for active memories that lack one under the current model. Batches of 64.
+    pub fn embed_missing(&mut self) -> Result<EmbedReport> {
+        let Some(model) = self.embedding_model_id() else {
+            let active = self.memories(false)?.len();
+            return Ok(EmbedReport { model: None, embedded: 0, covered: 0, active });
+        };
+        let missing = self.memories_missing_embedding(&model)?;
+        let mut embedded = 0;
+        for chunk in missing.chunks(64) {
+            let texts: Vec<&str> = chunk.iter().map(|m| m.text.as_str()).collect();
+            let Some((model_id, vectors)) = self.embed_texts(&texts) else { break };
+            for (m, v) in chunk.iter().zip(vectors.iter()) {
+                self.append_embed_event(&m.id, &model_id, v)?;
+                embedded += 1;
+            }
+        }
+        if embedded > 0 {
+            self.compile(false)?;
+        }
+        let (covered, active) = self.embedding_coverage(&model)?;
+        Ok(EmbedReport { model: Some(model), embedded, covered, active })
     }
 
     /// Tombstone a memory: append a forget event, redact the derive payload, recompile.
@@ -221,6 +273,12 @@ impl Vault {
         let ev = self.append_event(&channel, EventKind::Forget, Trust::Agent, payload)?;
         self.conn
             .execute("UPDATE events SET payload = NULL WHERE id = ?1", [memory_id])?;
+        // A vector is a lossy copy of the text; redact it too.
+        self.conn.execute(
+            "UPDATE events SET payload = NULL
+             WHERE kind = 'embed' AND payload IS NOT NULL AND json_extract(payload, '$.memory_id') = ?1",
+            [memory_id],
+        )?;
         self.compile(false)?;
         Ok(ev)
     }

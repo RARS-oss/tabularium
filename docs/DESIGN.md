@@ -55,13 +55,25 @@ Memories carry declarative **checks**: `file_exists`, `file_hash` (BLAKE3 baked 
 demoted and annotated with the reason, not hidden: the agent learns *that* the world changed.
 
 ### 2.5 Recall
-Exact BM25 over active memories (no ANN, no floating-point races across machines), then
-`score = bm25 × status_factor × trust_factor`, ties broken by recency, then a greedy knapsack under a
-token budget using a conservative token estimator. Each item carries a `why` string. The result is
-hashed and signed into a **receipt** that pins the ledger head, the query hash and the policy.
+Two exact rankings over active memories, no approximate index:
 
-Planned: embeddings computed once at ingest and stored as derived events, so hybrid recall stays
-deterministic across CPUs.
+- **lexical**: BM25 with English and Russian stopwords removed;
+- **semantic**: cosine between the query vector and vectors **stored in the ledger**. Each `remember`
+  appends an `embed` event `{memory_id, model, dim, vector_hex}`; compile materializes it into an
+  `embeddings` table. A rebuilt vault therefore carries bit-identical vectors, and only the *query* is
+  embedded live. Similarities are quantized to four decimals before ranking so low-bit differences
+  between CPUs cannot reorder ties. Forgetting a memory redacts its `embed` events too: a vector is a
+  lossy copy of the text.
+
+The rankings are fused by reciprocal rank, `Σ (K+1)/(K+rank)` with `K = 60` (rank 1 contributes 1.0),
+then `score = fused × status_factor × trust_factor`, ties by recency, then a greedy knapsack under a
+token budget using a conservative token estimator. Each item carries a `why` string showing both ranks.
+The receipt pins the ledger head, the query hash, the query vector hash, the model and the fusion policy.
+
+The embedder is a trait. The default backend is a multilingual MiniLM through ONNX Runtime, statically
+linked, model downloaded once. A deterministic hashing embedder drives the tests. Without any embedder
+the engine is pure BM25 and the receipt says so. The per-prompt `hint` is always lexical so hooks never
+pay for a model load.
 
 ## 3. Claims for the paper
 
@@ -77,8 +89,9 @@ deterministic across CPUs.
 ## 4. Roadmap
 
 1. **Week 1 (done):** ledger, keys, compile, verify, recall, receipts, MCP stdio server, CLI, property tests.
-2. **Week 2:** stored embeddings + hybrid ranking; contradiction detection on `subject`; hooks that
-   record file reads as evidence; `roots` support in MCP.
+2. **Week 2:** stored embeddings + hybrid ranking (done); contradiction detection on `subject`; hooks that
+   record file reads as evidence; `roots` support in MCP; a status for memories that carry no checks
+   ("unchecked") distinct from checks that could not run.
 3. **Week 3:** consolidation (dedup, merge) as explicit logged operations; shared vaults with
    per-key trust; `redact` of source events.
 4. **Week 4:** Python eval harness, baselines, benchmarks for staleness and injection, paper skeleton.

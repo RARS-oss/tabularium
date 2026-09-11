@@ -1,5 +1,6 @@
 //! A vault: one directory holding config, keys and the ledger database.
 
+use crate::embed::{Embedder, EmbeddingConfig, ENV_NO_EMBED};
 use crate::error::{Error, Result};
 use crate::keys::VaultKeys;
 use crate::types::Trust;
@@ -50,6 +51,17 @@ pub struct VaultConfig {
     pub root: Option<String>,
     #[serde(default)]
     pub policy: Policy,
+    #[serde(default)]
+    pub embeddings: EmbeddingConfig,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EmbedderState {
+    /// Not attempted yet; resolved lazily from config on first need.
+    Unresolved,
+    /// Disabled by config, environment, explicit call, or a failed load.
+    Disabled,
+    Ready,
 }
 
 pub struct Vault {
@@ -58,6 +70,8 @@ pub struct Vault {
     pub(crate) keys: VaultKeys,
     pub(crate) conn: Connection,
     pub(crate) root: PathBuf,
+    pub(crate) embedder: Option<Box<dyn Embedder>>,
+    pub(crate) embedder_state: EmbedderState,
 }
 
 const SCHEMA: &str = r#"
@@ -113,6 +127,12 @@ CREATE TABLE IF NOT EXISTS receipts (
     body TEXT NOT NULL,
     sig  TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS embeddings (
+    memory_id TEXT PRIMARY KEY,
+    model     TEXT NOT NULL,
+    dim       INTEGER NOT NULL,
+    vector    BLOB NOT NULL
+);
 "#;
 
 impl Vault {
@@ -152,6 +172,7 @@ impl Vault {
             name: name.to_string(),
             root: root.map(|p| p.to_string_lossy().to_string()),
             policy: Policy::default(),
+            embeddings: EmbeddingConfig::default(),
         };
         let toml_text = toml::to_string_pretty(&config).map_err(|e| Error::Config(format!("serialize config: {e}")))?;
         fs::write(dir.join(CONFIG_FILE), toml_text)?;
@@ -186,7 +207,84 @@ impl Vault {
             }
             None => std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
         };
-        Ok(Vault { dir: dir.to_path_buf(), config, keys, conn, root })
+        Ok(Vault {
+            dir: dir.to_path_buf(),
+            config,
+            keys,
+            conn,
+            root,
+            embedder: None,
+            embedder_state: EmbedderState::Unresolved,
+        })
+    }
+
+    /// Default model cache: `~/.tabularium/models`.
+    pub fn models_dir() -> PathBuf {
+        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+        home.join(".tabularium").join("models")
+    }
+
+    /// Install (or explicitly disable, with `None`) the embedder. Overrides config resolution.
+    pub fn set_embedder(&mut self, embedder: Option<Box<dyn Embedder>>) {
+        self.embedder_state = if embedder.is_some() { EmbedderState::Ready } else { EmbedderState::Disabled };
+        self.embedder = embedder;
+    }
+
+    /// Resolve the embedder from config on first use. Failures disable embeddings for this
+    /// process and are reported once on stderr; the engine keeps working lexically.
+    pub(crate) fn ensure_embedder(&mut self) {
+        if self.embedder_state != EmbedderState::Unresolved {
+            return;
+        }
+        self.embedder_state = EmbedderState::Disabled;
+        if !self.config.embeddings.enabled {
+            return;
+        }
+        if std::env::var(ENV_NO_EMBED).map(|v| v == "1").unwrap_or(false) {
+            return;
+        }
+        #[cfg(feature = "fastembed")]
+        {
+            let cache = self
+                .config
+                .embeddings
+                .cache_dir
+                .as_ref()
+                .map(PathBuf::from)
+                .unwrap_or_else(Vault::models_dir);
+            match crate::embed::onnx::OnnxEmbedder::new(&self.config.embeddings.model, &cache, true) {
+                Ok(e) => {
+                    self.embedder = Some(Box::new(e));
+                    self.embedder_state = EmbedderState::Ready;
+                }
+                Err(e) => eprintln!("[tabularium] embeddings disabled: {e}"),
+            }
+        }
+    }
+
+    /// Whether semantic recall is available (resolving the embedder if needed).
+    pub fn has_embedder(&mut self) -> bool {
+        self.ensure_embedder();
+        self.embedder.is_some()
+    }
+
+    /// Model id of the active embedder, if any.
+    pub fn embedding_model_id(&mut self) -> Option<String> {
+        self.ensure_embedder();
+        self.embedder.as_ref().map(|e| e.model_id().to_string())
+    }
+
+    /// Embed one text with the active embedder. `None` when embeddings are unavailable.
+    pub(crate) fn embed_texts(&mut self, texts: &[&str]) -> Option<(String, Vec<Vec<f32>>)> {
+        self.ensure_embedder();
+        let embedder = self.embedder.as_mut()?;
+        match embedder.embed(texts) {
+            Ok(vectors) => Some((embedder.model_id().to_string(), vectors)),
+            Err(e) => {
+                eprintln!("[tabularium] embedding failed, continuing lexically: {e}");
+                None
+            }
+        }
     }
 
     pub fn dir(&self) -> &Path {

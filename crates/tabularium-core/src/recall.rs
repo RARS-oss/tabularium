@@ -1,7 +1,11 @@
-//! Recall: rank active memories, verify them against the world, pack them under a token budget,
-//! and sign a receipt saying exactly what was handed to the agent.
+//! Recall: rank active memories lexically and semantically, verify them against the world, pack
+//! them under a token budget, and sign a receipt saying exactly what was handed to the agent.
+//!
+//! Ranking is deterministic: exact BM25, exact cosine over vectors stored in the ledger
+//! (quantized to four decimals), reciprocal-rank fusion with fixed tie-breaks.
 
 use crate::canon::{blake3_hex, canonical_json, RECEIPT_DOMAIN};
+use crate::embed::{cosine, quantize};
 use crate::error::Result;
 use crate::text::{estimate_tokens, tokenize, Bm25, Doc, BM25_B, BM25_K1};
 use crate::types::*;
@@ -10,12 +14,15 @@ use crate::verify::run_checks;
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::collections::HashMap;
 
-pub const POLICY_VERSION: u32 = 1;
+pub const POLICY_VERSION: u32 = 2;
 /// Tokens charged per item on top of its text, for the kind/status framing the host adds.
 pub const ITEM_OVERHEAD_TOKENS: u32 = 8;
 /// Upper bound on how many candidates get verified per recall, to bound recall latency.
 pub const MAX_VERIFY_CANDIDATES: usize = 200;
+/// Reciprocal-rank-fusion constant. Contribution of rank r is (K+1)/(K+r): rank 1 gives 1.0.
+pub const RRF_K: f64 = 60.0;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RecallOptions {
@@ -42,8 +49,11 @@ pub struct RecallItem {
     pub subject: Option<String>,
     pub trust: Trust,
     pub status: Status,
+    /// Final score after fusion and status/trust factors.
     pub score: f64,
     pub bm25: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cosine: Option<f32>,
     pub tokens: u32,
     pub created_at: String,
     pub evidence: Vec<String>,
@@ -65,8 +75,11 @@ pub struct RecallResult {
     pub used_tokens: u32,
     /// Active memories considered.
     pub considered: usize,
-    /// Memories with a non-zero lexical match (all of them for an empty query).
+    /// Memories matched lexically or semantically (all of them for an empty query).
     pub matched: usize,
+    /// Model used for semantic matching, when it was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub semantic_model: Option<String>,
     pub items: Vec<RecallItem>,
     pub skipped_for_budget: Vec<Skipped>,
     pub receipt: Receipt,
@@ -103,6 +116,10 @@ pub fn trust_factor(t: Trust) -> f64 {
     }
 }
 
+fn rrf(rank: usize) -> f64 {
+    (RRF_K + 1.0) / (RRF_K + rank as f64)
+}
+
 fn title_of(text: &str, max_chars: usize) -> String {
     let first_line = text.lines().next().unwrap_or("").trim();
     let mut out: String = first_line.chars().take(max_chars).collect();
@@ -112,59 +129,148 @@ fn title_of(text: &str, max_chars: usize) -> String {
     out
 }
 
-fn fmt_score(x: f64) -> String {
+fn f3(x: f64) -> String {
     format!("{x:.3}")
 }
 
-/// Active memories, their (index, bm25) ranking, and whether the query had lexical content.
-struct Ranking {
-    memories: Vec<Memory>,
-    scored: Vec<(usize, f64)>,
-    lexical: bool,
+/// Exact BM25 over active memories. Returns (index, score) for score > 0, best first, ties by
+/// recency. `lexical` is false when the query has no tokens.
+fn lexical_ranking(memories: &[Memory], query: &str) -> (Vec<(usize, f64)>, bool) {
+    let q = tokenize(query);
+    if q.is_empty() {
+        return (Vec::new(), false);
+    }
+    let docs: Vec<Doc<usize>> = memories
+        .iter()
+        .enumerate()
+        .map(|(i, m)| {
+            let mut text = m.text.clone();
+            if let Some(s) = &m.subject {
+                text.push(' ');
+                text.push_str(s);
+            }
+            Doc { key: i, tokens: tokenize(&text) }
+        })
+        .collect();
+    let mut scored: Vec<(usize, f64)> =
+        Bm25::build(docs).score_all(&q).into_iter().filter(|(_, s)| *s > 0.0).collect();
+    scored.sort_by(|a, b| {
+        b.1.partial_cmp(&a.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| memories[b.0].seq.cmp(&memories[a.0].seq))
+    });
+    (scored, true)
+}
+
+struct Semantic {
+    model: String,
+    query_hash: String,
+    /// (index, quantized cosine) at or above the threshold, best first, ties by recency.
+    ranking: Vec<(usize, f32)>,
+}
+
+/// One fused candidate before verification.
+struct Candidate {
+    idx: usize,
+    base: f64,
+    bm25: f64,
+    lex_rank: Option<usize>,
+    cosine: Option<f32>,
+    sem_rank: Option<usize>,
 }
 
 impl Vault {
-    fn ranked_candidates(&self, query: &str) -> Result<Ranking> {
-        let memories = self.memories(false)?;
-        let q = tokenize(query);
-        let lexical = !q.is_empty();
-        let docs: Vec<Doc<usize>> = memories
+    fn semantic_ranking(&mut self, memories: &[Memory], query: &str) -> Option<Semantic> {
+        if query.trim().is_empty() {
+            return None;
+        }
+        let (model, mut vectors) = self.embed_texts(&[query])?;
+        let qvec = vectors.pop()?;
+        let stored = self.embeddings_for_active(&model).ok()?;
+        if stored.is_empty() {
+            return None;
+        }
+        let index_of: HashMap<&str, usize> = memories.iter().enumerate().map(|(i, m)| (m.id.as_str(), i)).collect();
+        let threshold = self.config.embeddings.threshold;
+        let mut ranking: Vec<(usize, f32)> = stored
             .iter()
-            .enumerate()
-            .map(|(i, m)| {
-                let mut text = m.text.clone();
-                if let Some(s) = &m.subject {
-                    text.push(' ');
-                    text.push_str(s);
-                }
-                Doc { key: i, tokens: tokenize(&text) }
+            .filter_map(|(id, v)| {
+                let i = *index_of.get(id.as_str())?;
+                let c = quantize(cosine(&qvec, v));
+                (c >= threshold).then_some((i, c))
             })
             .collect();
-        let mut scored: Vec<(usize, f64)> = if lexical {
-            Bm25::build(docs).score_all(&q).into_iter().filter(|(_, s)| *s > 0.0).collect()
-        } else {
-            (0..memories.len()).map(|i| (i, 0.0)).collect()
-        };
-        // Deterministic order: score desc, then most recent first.
-        scored.sort_by(|a, b| {
+        ranking.sort_by(|a, b| {
             b.1.partial_cmp(&a.1)
                 .unwrap_or(std::cmp::Ordering::Equal)
                 .then_with(|| memories[b.0].seq.cmp(&memories[a.0].seq))
         });
-        Ok(Ranking { memories, scored, lexical })
+        Some(Semantic { model, query_hash: blake3_hex(&crate::embed::vector_to_bytes(&qvec)), ranking })
+    }
+
+    /// Lexical and semantic rankings fused with RRF. Without an embedder (or an empty query) this
+    /// degrades to plain BM25 (or recency order).
+    fn fused_candidates(&mut self, memories: &[Memory], query: &str) -> (Vec<Candidate>, bool, Option<Semantic>) {
+        let (lex, lexical) = lexical_ranking(memories, query);
+        let sem = self.semantic_ranking(memories, query);
+        let mut by_idx: HashMap<usize, Candidate> = HashMap::new();
+        if !lexical {
+            // Empty query: everything, recency order, base 1.0.
+            let mut all: Vec<Candidate> = memories
+                .iter()
+                .enumerate()
+                .map(|(i, _)| Candidate { idx: i, base: 1.0, bm25: 0.0, lex_rank: None, cosine: None, sem_rank: None })
+                .collect();
+            all.sort_by(|a, b| memories[b.idx].seq.cmp(&memories[a.idx].seq));
+            return (all, false, None);
+        }
+        for (rank, (i, s)) in lex.iter().enumerate() {
+            by_idx.insert(*i, Candidate { idx: *i, base: 0.0, bm25: *s, lex_rank: Some(rank + 1), cosine: None, sem_rank: None });
+        }
+        if let Some(sem) = &sem {
+            for (rank, (i, c)) in sem.ranking.iter().enumerate() {
+                let e = by_idx.entry(*i).or_insert(Candidate {
+                    idx: *i,
+                    base: 0.0,
+                    bm25: 0.0,
+                    lex_rank: None,
+                    cosine: None,
+                    sem_rank: None,
+                });
+                e.cosine = Some(*c);
+                e.sem_rank = Some(rank + 1);
+            }
+            for c in by_idx.values_mut() {
+                c.base = c.lex_rank.map(rrf).unwrap_or(0.0) + c.sem_rank.map(rrf).unwrap_or(0.0);
+            }
+        } else {
+            for c in by_idx.values_mut() {
+                c.base = c.bm25;
+            }
+        }
+        let mut cands: Vec<Candidate> = by_idx.into_values().collect();
+        cands.sort_by(|a, b| {
+            b.base
+                .partial_cmp(&a.base)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| b.bm25.partial_cmp(&a.bm25).unwrap_or(std::cmp::Ordering::Equal))
+                .then_with(|| memories[b.idx].seq.cmp(&memories[a.idx].seq))
+        });
+        (cands, true, sem)
     }
 
     /// Rank, verify, pack under budget, sign a receipt.
-    pub fn recall(&self, query: &str, opts: &RecallOptions) -> Result<RecallResult> {
-        let Ranking { memories, scored, lexical } = self.ranked_candidates(query)?;
+    pub fn recall(&mut self, query: &str, opts: &RecallOptions) -> Result<RecallResult> {
+        let memories = self.memories(false)?;
+        let (cands, lexical, sem) = self.fused_candidates(&memories, query);
         let now = chrono::Utc::now();
         let considered = memories.len();
-        let matched = scored.len();
+        let matched = cands.len();
 
         // Verify and compute final scores for a bounded prefix of the ranking.
-        let mut candidates: Vec<RecallItem> = Vec::new();
-        for (i, bm25) in scored.iter().take(MAX_VERIFY_CANDIDATES) {
-            let m = &memories[*i];
+        let mut items: Vec<(RecallItem, u64)> = Vec::new();
+        for c in cands.iter().take(MAX_VERIFY_CANDIDATES) {
+            let m = &memories[c.idx];
             let (status, checks) = if opts.verify {
                 run_checks(&self.root, &m.checks, &now)
             } else {
@@ -173,76 +279,92 @@ impl Vault {
             if status == Status::Stale && !opts.include_stale {
                 continue;
             }
-            let base = if lexical { *bm25 } else { 1.0 };
-            let score = base * status_factor(status) * trust_factor(m.trust);
+            let score = c.base * status_factor(status) * trust_factor(m.trust);
             let tokens = estimate_tokens(&m.text) + ITEM_OVERHEAD_TOKENS;
-            let mut why = if lexical {
-                format!("bm25 {}", fmt_score(*bm25))
+            let mut why = String::new();
+            if !lexical {
+                why.push_str("no query: recency order");
+            } else if sem.is_some() {
+                let mut parts = Vec::new();
+                if let Some(r) = c.lex_rank {
+                    parts.push(format!("bm25 {} (#{r})", f3(c.bm25)));
+                }
+                if let (Some(cs), Some(r)) = (c.cosine, c.sem_rank) {
+                    parts.push(format!("cos {cs:.3} (#{r})"));
+                }
+                why.push_str(&format!("{} → rrf {}", parts.join(" + "), f3(c.base)));
             } else {
-                "no query: recency order".to_string()
-            };
+                why.push_str(&format!("bm25 {}", f3(c.bm25)));
+            }
             why.push_str(&format!(
                 " × status {} ({}) × trust {} ({}) = {}",
                 status,
-                fmt_score(status_factor(status)),
+                f3(status_factor(status)),
                 m.trust,
-                fmt_score(trust_factor(m.trust)),
-                fmt_score(score)
+                f3(trust_factor(m.trust)),
+                f3(score)
             ));
-            if let Some(fail) = checks.iter().find_map(|c| match &c.outcome {
+            if let Some(fail) = checks.iter().find_map(|r| match &r.outcome {
                 CheckOutcome::Fail { reason } => Some(reason.clone()),
                 _ => None,
             }) {
                 why.push_str(&format!("; stale because: {fail}"));
             }
-            candidates.push(RecallItem {
-                id: m.id.clone(),
-                kind: m.kind,
-                text: m.text.clone(),
-                subject: m.subject.clone(),
-                trust: m.trust,
-                status,
-                score,
-                bm25: *bm25,
-                tokens,
-                created_at: m.created_at.clone(),
-                evidence: m.evidence.clone(),
-                checks,
-                why,
-            });
+            items.push((
+                RecallItem {
+                    id: m.id.clone(),
+                    kind: m.kind,
+                    text: m.text.clone(),
+                    subject: m.subject.clone(),
+                    trust: m.trust,
+                    status,
+                    score,
+                    bm25: c.bm25,
+                    cosine: c.cosine,
+                    tokens,
+                    created_at: m.created_at.clone(),
+                    evidence: m.evidence.clone(),
+                    checks,
+                    why,
+                },
+                m.seq,
+            ));
         }
-        // Re-rank by final score; ties by recency (seq desc == created order desc).
-        let seq_of = |id: &str| memories.iter().find(|m| m.id == id).map(|m| m.seq).unwrap_or(0);
-        candidates.sort_by(|a, b| {
-            b.score
-                .partial_cmp(&a.score)
+        // Re-rank by final score; ties by recency.
+        items.sort_by(|a, b| {
+            b.0.score
+                .partial_cmp(&a.0.score)
                 .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| seq_of(&b.id).cmp(&seq_of(&a.id)))
+                .then_with(|| b.1.cmp(&a.1))
         });
 
         // Greedy knapsack under the budget.
-        let mut items = Vec::new();
+        let mut chosen = Vec::new();
         let mut skipped = Vec::new();
         let mut used: u32 = 0;
-        for c in candidates {
-            if items.len() >= opts.limit {
+        for (it, _) in items {
+            if chosen.len() >= opts.limit {
                 break;
             }
-            if used + c.tokens <= opts.budget_tokens {
-                used += c.tokens;
-                items.push(c);
+            if used + it.tokens <= opts.budget_tokens {
+                used += it.tokens;
+                chosen.push(it);
             } else {
-                skipped.push(Skipped { id: c.id, tokens: c.tokens, score: c.score });
+                skipped.push(Skipped { id: it.id, tokens: it.tokens, score: it.score });
             }
         }
 
         let (head_seq, head_hash) = self.head()?;
-        let receipt_items: Vec<serde_json::Value> = items
+        let receipt_items: Vec<serde_json::Value> = chosen
             .iter()
             .map(|it| json!({"id": it.id, "status": it.status, "tokens": it.tokens, "score": it.score}))
             .collect();
         let result_hash = blake3_hex(canonical_json(&serde_json::Value::Array(receipt_items.clone())).as_bytes());
         let ts = now_rfc3339();
+        let semantic_policy = sem.as_ref().map(|s| {
+            json!({"model": s.model, "threshold": self.config.embeddings.threshold, "fusion": "rrf", "k": RRF_K,
+                   "query_vector_hash": s.query_hash})
+        });
         let body = json!({
             "kind": "recall",
             "ts": ts,
@@ -255,6 +377,7 @@ impl Vault {
             "policy": {
                 "version": POLICY_VERSION,
                 "bm25": {"k1": BM25_K1, "b": BM25_B},
+                "semantic": semantic_policy,
                 "status_factor": {"fresh": 1.0, "unverified": 0.9, "stale": 0.5},
                 "trust_factor": {"user": 1.0, "agent": 0.95, "tool": 0.9, "external": 0.8},
                 "item_overhead_tokens": ITEM_OVERHEAD_TOKENS,
@@ -271,15 +394,18 @@ impl Vault {
             used_tokens: used,
             considered,
             matched,
-            items,
+            semantic_model: sem.map(|s| s.model),
+            items: chosen,
             skipped_for_budget: skipped,
             receipt,
         })
     }
 
-    /// Cheap "you have memories about this" probe. No verification, no receipt.
+    /// Cheap "you have memories about this" probe: lexical only, no verification, no receipt,
+    /// no model load. Meant for per-prompt hooks.
     pub fn hint(&self, text: &str, n: usize) -> Result<HintResult> {
-        let Ranking { memories, scored, lexical } = self.ranked_candidates(text)?;
+        let memories = self.memories(false)?;
+        let (scored, lexical) = lexical_ranking(&memories, text);
         if !lexical {
             return Ok(HintResult { matched: 0, items: Vec::new() });
         }

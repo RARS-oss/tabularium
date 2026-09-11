@@ -12,6 +12,7 @@
 
 pub mod canon;
 pub mod compile;
+pub mod embed;
 pub mod error;
 pub mod keys;
 pub mod ledger;
@@ -22,8 +23,9 @@ pub mod vault;
 pub mod verify;
 
 pub use compile::CompileReport;
+pub use embed::{Embedder, EmbeddingConfig, HashEmbedder};
 pub use error::{Error, Result};
-pub use ledger::{derive_trust, AuditReport, ObserveInput, RememberInput};
+pub use ledger::{derive_trust, AuditReport, EmbedReport, ObserveInput, RememberInput};
 pub use recall::{HintItem, HintResult, RecallItem, RecallOptions, RecallResult, Skipped};
 pub use types::*;
 pub use vault::{now_rfc3339, Policy, Vault, VaultConfig};

@@ -96,6 +96,7 @@ proptest! {
     fn trust_monotonicity_and_determinism(ops in prop::collection::vec(op_strategy(), 1..40)) {
         let dir = tempfile::tempdir().unwrap();
         let mut v = Vault::init(&dir.path().join("v"), "prop", Some(dir.path())).unwrap();
+        v.set_embedder(Some(Box::new(HashEmbedder::new(16))));
         let (events, _) = run_ops(&mut v, &ops);
         let trust_by_id: HashMap<&str, Trust> = events.iter().map(|e| (e.id.as_str(), e.trust)).collect();
 
@@ -129,6 +130,7 @@ proptest! {
     ) {
         let dir = tempfile::tempdir().unwrap();
         let mut v = Vault::init(&dir.path().join("v"), "prop", Some(dir.path())).unwrap();
+        v.set_embedder(Some(Box::new(HashEmbedder::new(16))));
         for t in &texts {
             let _ = v.remember(RememberInput {
                 kind: MemoryKind::Fact, text: t.clone(), subject: None, evidence: vec![], checks: vec![],

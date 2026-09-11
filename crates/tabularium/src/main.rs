@@ -95,6 +95,12 @@ enum Cmd {
     },
     /// Show a signed receipt
     Receipt { id: String },
+    /// Write vectors for memories that lack one (vectors live in the ledger; recall stays reproducible)
+    Embed {
+        /// Only report coverage, do not embed
+        #[arg(long)]
+        status: bool,
+    },
     /// Vault status
     Info,
     /// Serve the Model Context Protocol over stdio (creates the vault if missing)
@@ -235,7 +241,7 @@ fn main() -> Result<()> {
             }
         }
         Cmd::Recall { query, budget, limit, no_verify, drop_stale } => {
-            let v = open(&cli.vault)?;
+            let mut v = open(&cli.vault)?;
             let query = query.unwrap_or_default();
             let opts = RecallOptions { budget_tokens: budget, limit, verify: !no_verify, include_stale: !drop_stale };
             let r = v.recall(&query, &opts)?;
@@ -243,13 +249,14 @@ fn main() -> Result<()> {
                 print_json(&r)?;
             } else {
                 println!(
-                    "{} of {} matched, {} returned, {}/{} tokens, {} skipped for budget, receipt {}",
+                    "{} of {} matched, {} returned, {}/{} tokens, {} skipped for budget, {}, receipt {}",
                     r.matched,
                     r.considered,
                     r.items.len(),
                     r.used_tokens,
                     r.budget_tokens,
                     r.skipped_for_budget.len(),
+                    r.semantic_model.as_deref().map(|m| format!("semantic via {m}")).unwrap_or_else(|| "lexical only".into()),
                     short(&r.receipt.id)
                 );
                 for it in &r.items {
@@ -401,15 +408,43 @@ fn main() -> Result<()> {
             let r = v.get_receipt(&id)?.ok_or_else(|| anyhow!("receipt '{id}' not found"))?;
             print_json(&r)?;
         }
+        Cmd::Embed { status } => {
+            let mut v = open(&cli.vault)?;
+            let r = if status {
+                match v.embedding_model_id() {
+                    Some(model) => {
+                        let (covered, active) = v.embedding_coverage(&model)?;
+                        EmbedReport { model: Some(model), embedded: 0, covered, active }
+                    }
+                    None => EmbedReport { model: None, embedded: 0, covered: 0, active: v.memories(false)?.len() },
+                }
+            } else {
+                v.embed_missing()?
+            };
+            if cli.json {
+                print_json(&r)?;
+            } else {
+                match &r.model {
+                    Some(m) => println!("model {m}: {} embedded now, {}/{} active memories covered", r.embedded, r.covered, r.active),
+                    None => println!("embeddings unavailable (disabled in vault.toml, TABULARIUM_NO_EMBED=1, or model failed to load); {} active memories", r.active),
+                }
+            }
+        }
         Cmd::Info => {
             let v = open(&cli.vault)?;
             let (seq, hash) = v.head()?;
             let a = v.memories(false)?.len();
             let t = v.memories(true)?.len();
+            // Coverage only; do not load the model just to print info.
+            let cfg_model = v.config().embeddings.model.clone();
+            let enabled = v.config().embeddings.enabled;
+            let stored_model = format!("fastembed:{}", cfg_model.to_ascii_lowercase());
+            let (covered, _) = v.embedding_coverage(&stored_model)?;
             if cli.json {
                 print_json(&serde_json::json!({
                     "vault": v.dir(), "root": v.root(), "name": v.config().name, "events": v.event_count()?,
                     "head": {"seq": seq, "hash": hash}, "memories": {"active": a, "total": t},
+                    "embeddings": {"enabled": enabled, "model": cfg_model, "covered": covered, "active": a},
                     "public_key": v.public_key_hex(), "version": tabularium_core::VERSION
                 }))?;
             } else {
@@ -417,6 +452,10 @@ fn main() -> Result<()> {
                 println!("root      {}", v.root().display());
                 println!("events    {} (head {}@{})", v.event_count()?, seq, short(&hash));
                 println!("memories  {a} active / {t} total");
+                println!(
+                    "vectors   {covered}/{a} under {cfg_model}{}",
+                    if enabled { "" } else { " (disabled)" }
+                );
                 println!("pubkey    {}", v.public_key_hex());
             }
         }
@@ -430,6 +469,14 @@ fn main() -> Result<()> {
             };
             eprintln!("[tabularium] serving MCP over stdio; vault {}; root {}", vault.dir().display(), vault.root().display());
             let mut server = McpServer::new(vault);
+            // Long-lived process: load the model once and backfill vectors before the first recall.
+            match server.vault_mut().embed_missing() {
+                Ok(r) => match r.model {
+                    Some(m) => eprintln!("[tabularium] embeddings via {m}: {} written, {}/{} covered", r.embedded, r.covered, r.active),
+                    None => eprintln!("[tabularium] embeddings unavailable; lexical recall only"),
+                },
+                Err(e) => eprintln!("[tabularium] embedding backfill failed: {e}"),
+            }
             server.run_stdio()?;
         }
         Cmd::Hook { event } => {
@@ -452,6 +499,9 @@ fn clean_path(p: &std::path::Path) -> PathBuf {
 }
 
 fn run_hook(vault_dir: &Option<PathBuf>, event: &str) -> Result<()> {
+    // Hooks run on every prompt; never pay for a model load there.
+    // SAFETY: single-threaded CLI, set before any other thread exists.
+    unsafe { std::env::set_var(tabularium_core::embed::ENV_NO_EMBED, "1") };
     let raw = read_stdin()?;
     let input: serde_json::Value = match serde_json::from_str(&raw) {
         Ok(v) => v,
