@@ -3,7 +3,7 @@
 use anyhow::{anyhow, Context, Result};
 use clap::{Args, Parser, Subcommand};
 use std::io::{IsTerminal, Read};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tabularium_core::*;
 use tabularium_mcp::McpServer;
 
@@ -13,6 +13,10 @@ struct Cli {
     /// Vault directory (default: $TABULARIUM_VAULT or ~/.tabularium/default)
     #[arg(long, global = true, env = "TABULARIUM_VAULT")]
     vault: Option<PathBuf>,
+    /// Personal writer identity directory (default: $TABULARIUM_IDENTITY or ~/.tabularium/identity,
+    /// used only if it exists -- omit entirely to keep signing with the vault's own key alone)
+    #[arg(long, global = true, env = "TABULARIUM_IDENTITY")]
+    identity: Option<PathBuf>,
     /// Emit JSON instead of human-readable output
     #[arg(long, global = true)]
     json: bool,
@@ -30,6 +34,16 @@ enum Cmd {
         /// Project root for relative check paths (default: working directory at each open)
         #[arg(long)]
         root: Option<PathBuf>,
+    },
+    /// Manage this machine's personal writer identity, reusable across any vault
+    Identity {
+        #[command(subcommand)]
+        cmd: IdentityCmd,
+    },
+    /// Manage this vault's writer registry (who may write, and at what trust ceiling)
+    Writer {
+        #[command(subcommand)]
+        cmd: WriterCmd,
     },
     /// Record an event (content from argument or stdin)
     Observe {
@@ -126,6 +140,32 @@ enum Cmd {
     },
 }
 
+#[derive(Subcommand)]
+enum IdentityCmd {
+    /// Generate a new personal identity keypair (fails if one already exists)
+    Init,
+    /// Print this machine's identity public key
+    Show,
+}
+
+#[derive(Subcommand)]
+enum WriterCmd {
+    /// Register a writer's public key with a trust ceiling
+    Add {
+        pubkey: String,
+        /// Human-readable label
+        #[arg(long)]
+        name: String,
+        /// external | tool | agent | user
+        #[arg(long = "max-trust")]
+        max_trust: String,
+    },
+    /// List registered writers
+    List,
+    /// Remove a writer from the registry
+    Remove { pubkey: String },
+}
+
 #[derive(Args)]
 struct RememberArgs {
     /// fact | preference | instruction | reference | note
@@ -175,9 +215,21 @@ fn text_or_stdin(arg: Option<String>) -> Result<String> {
     }
 }
 
-fn open(vault_dir: &Option<PathBuf>) -> Result<Vault> {
+fn open(vault_dir: &Option<PathBuf>, identity_dir: &Option<PathBuf>) -> Result<Vault> {
     let dir = Vault::resolve_dir(vault_dir.as_deref());
-    Vault::open(&dir).map_err(|e| anyhow!("{e}"))
+    let mut v = Vault::open(&dir).map_err(|e| anyhow!("{e}"))?;
+    load_writer_identity(&mut v, identity_dir.as_deref())?;
+    Ok(v)
+}
+
+/// Load and install this process's writer identity, if one is configured (explicit path, else
+/// `TABULARIUM_IDENTITY`, else `~/.tabularium/identity` if it exists). A no-op otherwise.
+fn load_writer_identity(v: &mut Vault, explicit: Option<&Path>) -> Result<()> {
+    if let Some(dir) = Vault::resolve_identity_dir(explicit) {
+        let keys = tabularium_core::keys::VaultKeys::load(&dir).map_err(|e| anyhow!("loading identity at {}: {e}", dir.display()))?;
+        v.set_writer_identity(Some(keys));
+    }
+    Ok(())
 }
 
 fn print_json<T: serde::Serialize>(v: &T) -> Result<()> {
@@ -206,8 +258,65 @@ fn main() -> Result<()> {
                 println!("public key {}", v.public_key_hex());
             }
         }
+        Cmd::Identity { cmd } => match cmd {
+            IdentityCmd::Init => {
+                let dir = Vault::resolve_identity_path(cli.identity.as_deref());
+                if dir.join(tabularium_core::keys::SECRET_FILE).is_file() {
+                    return Err(anyhow!("identity already exists at {} (delete it manually to regenerate)", dir.display()));
+                }
+                let keys = tabularium_core::keys::VaultKeys::generate().map_err(|e| anyhow!("{e}"))?;
+                keys.save(&dir).map_err(|e| anyhow!("{e}"))?;
+                if cli.json {
+                    print_json(&serde_json::json!({"identity_dir": dir, "public_key": keys.public_key_hex()}))?;
+                } else {
+                    println!("identity created: {}", keys.public_key_hex());
+                    println!("stored at {}", dir.display());
+                }
+            }
+            IdentityCmd::Show => {
+                let dir = Vault::resolve_identity_path(cli.identity.as_deref());
+                let keys = tabularium_core::keys::VaultKeys::load(&dir)
+                    .map_err(|e| anyhow!("no identity at {} (run `tabularium identity init` first): {e}", dir.display()))?;
+                if cli.json {
+                    print_json(&serde_json::json!({"identity_dir": dir, "public_key": keys.public_key_hex()}))?;
+                } else {
+                    println!("{}", keys.public_key_hex());
+                }
+            }
+        },
+        Cmd::Writer { cmd } => {
+            let mut v = open(&cli.vault, &cli.identity)?;
+            match cmd {
+                WriterCmd::Add { pubkey, name, max_trust } => {
+                    let max_trust = Trust::parse(&max_trust).ok_or_else(|| anyhow!("unknown trust '{max_trust}'"))?;
+                    hex::decode(&pubkey).map_err(|_| anyhow!("pubkey must be hex"))?;
+                    v.config_mut().policy.writers.insert(pubkey.clone(), WriterPolicy { name: name.clone(), max_trust });
+                    v.save_config()?;
+                    println!("registered writer {pubkey} as '{name}', max trust {max_trust}");
+                }
+                WriterCmd::List => {
+                    let writers = &v.config().policy.writers;
+                    if cli.json {
+                        print_json(writers)?;
+                    } else if writers.is_empty() {
+                        println!("no registered writers (this vault's own key signs everything, unrestricted)");
+                    } else {
+                        for (pubkey, w) in writers {
+                            println!("{pubkey} '{}' max trust {}", w.name, w.max_trust);
+                        }
+                    }
+                }
+                WriterCmd::Remove { pubkey } => {
+                    if v.config_mut().policy.writers.remove(&pubkey).is_none() {
+                        return Err(anyhow!("no such writer '{pubkey}'"));
+                    }
+                    v.save_config()?;
+                    println!("removed writer {pubkey}");
+                }
+            }
+        }
         Cmd::Observe { kind, trust, channel, content } => {
-            let mut v = open(&cli.vault)?;
+            let mut v = open(&cli.vault, &cli.identity)?;
             let kind = EventKind::parse(&kind).ok_or_else(|| anyhow!("unknown kind '{kind}'"))?;
             let trust = match trust {
                 Some(t) => Some(Trust::parse(&t).ok_or_else(|| anyhow!("unknown trust '{t}'"))?),
@@ -222,7 +331,7 @@ fn main() -> Result<()> {
             }
         }
         Cmd::Remember(a) => {
-            let mut v = open(&cli.vault)?;
+            let mut v = open(&cli.vault, &cli.identity)?;
             let kind = MemoryKind::parse(&a.kind).ok_or_else(|| anyhow!("unknown memory kind '{}'", a.kind))?;
             let text = text_or_stdin(a.text)?;
             let mut checks = Vec::new();
@@ -259,7 +368,7 @@ fn main() -> Result<()> {
             }
         }
         Cmd::Recall { query, budget, limit, no_verify, drop_stale } => {
-            let mut v = open(&cli.vault)?;
+            let mut v = open(&cli.vault, &cli.identity)?;
             let query = query.unwrap_or_default();
             let opts = RecallOptions { budget_tokens: budget, limit, verify: !no_verify, include_stale: !drop_stale };
             let r = v.recall(&query, &opts)?;
@@ -285,7 +394,7 @@ fn main() -> Result<()> {
             }
         }
         Cmd::Hint { text, n } => {
-            let v = open(&cli.vault)?;
+            let v = open(&cli.vault, &cli.identity)?;
             let raw = match text {
                 Some(t) => t,
                 None => {
@@ -314,7 +423,7 @@ fn main() -> Result<()> {
             }
         }
         Cmd::Verify { memory_id } => {
-            let v = open(&cli.vault)?;
+            let v = open(&cli.vault, &cli.identity)?;
             let reports = v.verify(memory_id.as_deref())?;
             if cli.json {
                 let items: Vec<serde_json::Value> = reports
@@ -336,7 +445,7 @@ fn main() -> Result<()> {
             }
         }
         Cmd::Contradictions { threshold } => {
-            let mut v = open(&cli.vault)?;
+            let mut v = open(&cli.vault, &cli.identity)?;
             let r = v.contradictions(&ContradictOptions { threshold })?;
             if cli.json {
                 print_json(&r)?;
@@ -359,7 +468,7 @@ fn main() -> Result<()> {
             }
         }
         Cmd::Duplicates { threshold } => {
-            let mut v = open(&cli.vault)?;
+            let mut v = open(&cli.vault, &cli.identity)?;
             let r = v.duplicates(&DuplicateOptions { threshold })?;
             if cli.json {
                 print_json(&r)?;
@@ -378,7 +487,7 @@ fn main() -> Result<()> {
             }
         }
         Cmd::Forget { memory_id, reason } => {
-            let mut v = open(&cli.vault)?;
+            let mut v = open(&cli.vault, &cli.identity)?;
             let report = v.forget(&memory_id, &reason, "cli")?;
             if cli.json {
                 print_json(&report)?;
@@ -391,7 +500,7 @@ fn main() -> Result<()> {
             }
         }
         Cmd::Audit => {
-            let v = open(&cli.vault)?;
+            let v = open(&cli.vault, &cli.identity)?;
             let a = v.audit()?;
             if cli.json {
                 print_json(&a)?;
@@ -413,7 +522,7 @@ fn main() -> Result<()> {
             }
         }
         Cmd::Compile { rebuild } => {
-            let mut v = open(&cli.vault)?;
+            let mut v = open(&cli.vault, &cli.identity)?;
             let r = v.compile(rebuild)?;
             if cli.json {
                 print_json(&r)?;
@@ -430,7 +539,7 @@ fn main() -> Result<()> {
             }
         }
         Cmd::Events { after, limit } => {
-            let v = open(&cli.vault)?;
+            let v = open(&cli.vault, &cli.identity)?;
             let evs = v.events(after, limit)?;
             if cli.json {
                 print_json(&evs)?;
@@ -448,7 +557,7 @@ fn main() -> Result<()> {
             }
         }
         Cmd::Memories { all } => {
-            let v = open(&cli.vault)?;
+            let v = open(&cli.vault, &cli.identity)?;
             let ms = v.memories(all)?;
             if cli.json {
                 print_json(&ms)?;
@@ -468,12 +577,12 @@ fn main() -> Result<()> {
             }
         }
         Cmd::Receipt { id } => {
-            let v = open(&cli.vault)?;
+            let v = open(&cli.vault, &cli.identity)?;
             let r = v.get_receipt(&id)?.ok_or_else(|| anyhow!("receipt '{id}' not found"))?;
             print_json(&r)?;
         }
         Cmd::Embed { status } => {
-            let mut v = open(&cli.vault)?;
+            let mut v = open(&cli.vault, &cli.identity)?;
             let r = if status {
                 match v.embedding_model_id() {
                     Some(model) => {
@@ -495,7 +604,7 @@ fn main() -> Result<()> {
             }
         }
         Cmd::Info => {
-            let v = open(&cli.vault)?;
+            let v = open(&cli.vault, &cli.identity)?;
             let (seq, hash) = v.head()?;
             let a = v.memories(false)?.len();
             let t = v.memories(true)?.len();
@@ -525,12 +634,16 @@ fn main() -> Result<()> {
         }
         Cmd::Serve => {
             let dir = Vault::resolve_dir(cli.vault.as_deref());
-            let vault = if Vault::exists(&dir) {
+            let mut vault = if Vault::exists(&dir) {
                 Vault::open(&dir).map_err(|e| anyhow!("{e}"))?
             } else {
                 eprintln!("[tabularium] creating vault at {}", dir.display());
                 Vault::init(&dir, "default", None).map_err(|e| anyhow!("{e}"))?
             };
+            load_writer_identity(&mut vault, cli.identity.as_deref())?;
+            if let Some(pk) = vault.writer_public_key_hex() {
+                eprintln!("[tabularium] writer identity {pk}");
+            }
             eprintln!("[tabularium] serving MCP over stdio; vault {}; root {}", vault.dir().display(), vault.root().display());
             let mut server = McpServer::new(vault);
             // Long-lived process: load the model once and backfill vectors before the first recall.
@@ -545,7 +658,7 @@ fn main() -> Result<()> {
         }
         Cmd::Hook { event } => {
             // Hooks must never break the agent: swallow errors, exit 0, print nothing on failure.
-            if let Err(e) = run_hook(&cli.vault, &event) {
+            if let Err(e) = run_hook(&cli.vault, &cli.identity, &event) {
                 eprintln!("[tabularium hook] {e}");
             }
         }
@@ -562,7 +675,7 @@ fn clean_path(p: &std::path::Path) -> PathBuf {
     }
 }
 
-fn run_hook(vault_dir: &Option<PathBuf>, event: &str) -> Result<()> {
+fn run_hook(vault_dir: &Option<PathBuf>, identity_dir: &Option<PathBuf>, event: &str) -> Result<()> {
     // Hooks run on every prompt; never pay for a model load there.
     // SAFETY: single-threaded CLI, set before any other thread exists.
     unsafe { std::env::set_var(tabularium_core::embed::ENV_NO_EMBED, "1") };
@@ -581,6 +694,7 @@ fn run_hook(vault_dir: &Option<PathBuf>, event: &str) -> Result<()> {
         return Ok(());
     }
     let mut v = Vault::open(&dir).map_err(|e| anyhow!("{e}"))?;
+    load_writer_identity(&mut v, identity_dir.as_deref())?;
     if let Some(cwd) = input.get("cwd").and_then(|c| c.as_str()) {
         v.set_root(PathBuf::from(cwd));
     }

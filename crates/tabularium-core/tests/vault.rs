@@ -650,3 +650,30 @@ fn open_requires_init_and_init_refuses_double() {
     assert_eq!(v.head().unwrap().0, 0);
     assert_eq!(v.public_key_hex().len(), 64);
 }
+
+#[test]
+fn writer_registry_round_trips_through_vault_toml() {
+    let (dir, mut v) = new_vault();
+    let pubkey = "abc123".to_string();
+    v.config_mut().policy.writers.insert(pubkey.clone(), WriterPolicy { name: "daniil".into(), max_trust: Trust::User });
+    v.save_config().unwrap();
+
+    let reopened = Vault::open(&dir.path().join("vault")).unwrap();
+    let w = reopened.config().policy.writers.get(&pubkey).unwrap();
+    assert_eq!(w.name, "daniil");
+    assert_eq!(w.max_trust, Trust::User);
+    assert_eq!(reopened.config().policy.max_trust_for_writer(&pubkey), Trust::User);
+    assert_eq!(reopened.config().policy.max_trust_for_writer("unregistered"), Trust::External, "unknown key is capped at the safe default");
+}
+
+#[test]
+fn identity_dir_resolution_requires_an_actual_keypair() {
+    let dir = tempfile::tempdir().unwrap();
+    let identity_path = dir.path().join("identity");
+    assert_eq!(Vault::resolve_identity_path(Some(&identity_path)), identity_path);
+    assert!(Vault::resolve_identity_dir(Some(&identity_path)).is_none(), "nothing generated there yet");
+
+    let generated = tabularium_core::keys::VaultKeys::generate().unwrap();
+    generated.save(&identity_path).unwrap();
+    assert_eq!(Vault::resolve_identity_dir(Some(&identity_path)), Some(identity_path));
+}

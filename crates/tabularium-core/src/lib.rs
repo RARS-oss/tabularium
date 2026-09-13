@@ -32,6 +32,6 @@ pub use error::{Error, Result};
 pub use ledger::{derive_trust, AuditReport, EmbedReport, ForgetReport, ObserveInput, RememberInput};
 pub use recall::{HintItem, HintResult, RecallItem, RecallOptions, RecallResult, Skipped};
 pub use types::*;
-pub use vault::{now_rfc3339, Policy, Vault, VaultConfig};
+pub use vault::{now_rfc3339, Policy, Vault, VaultConfig, WriterPolicy};
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

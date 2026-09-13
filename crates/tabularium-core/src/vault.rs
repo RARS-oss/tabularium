@@ -15,14 +15,28 @@ pub const DB_FILE: &str = "ledger.db";
 pub const KEYS_DIR: &str = "keys";
 pub const CONFIG_VERSION: u32 = 1;
 pub const ENV_VAULT: &str = "TABULARIUM_VAULT";
+pub const ENV_IDENTITY: &str = "TABULARIUM_IDENTITY";
 
-/// Who may assert which trust level. Channels not listed fall back to `default_max_trust`.
+/// A registered writer: a public key the vault owner has authorized, with a name for humans and a
+/// trust ceiling for the engine. Mirrors an SSH `authorized_keys` entry.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WriterPolicy {
+    pub name: String,
+    pub max_trust: Trust,
+}
+
+/// Who may assert which trust level. Channels not listed fall back to `default_max_trust`; this is
+/// a labeling convention, not a security boundary (`channel` is self-reported). `writers` is the
+/// real boundary: a public key not listed here caps at `Trust::External` regardless of channel,
+/// enforced by `Vault::check_writer_trust` against a signature only that key could have produced.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Policy {
     #[serde(default = "default_max_trust")]
     pub default_max_trust: Trust,
     #[serde(default)]
     pub channels: BTreeMap<String, Trust>,
+    #[serde(default)]
+    pub writers: BTreeMap<String, WriterPolicy>,
 }
 
 fn default_max_trust() -> Trust {
@@ -31,13 +45,19 @@ fn default_max_trust() -> Trust {
 
 impl Default for Policy {
     fn default() -> Self {
-        Policy { default_max_trust: Trust::User, channels: BTreeMap::new() }
+        Policy { default_max_trust: Trust::User, channels: BTreeMap::new(), writers: BTreeMap::new() }
     }
 }
 
 impl Policy {
     pub fn max_trust_for(&self, channel: &str) -> Trust {
         self.channels.get(channel).copied().unwrap_or(self.default_max_trust)
+    }
+
+    /// Trust ceiling for a registered writer's public key, or `Trust::External` when the key is
+    /// not (or no longer) registered -- the safe default for an unknown or revoked signer.
+    pub fn max_trust_for_writer(&self, pubkey_hex: &str) -> Trust {
+        self.writers.get(pubkey_hex).map(|w| w.max_trust).unwrap_or(Trust::External)
     }
 }
 
@@ -72,6 +92,9 @@ pub struct Vault {
     pub(crate) root: PathBuf,
     pub(crate) embedder: Option<Box<dyn Embedder>>,
     pub(crate) embedder_state: EmbedderState,
+    /// This process's writer identity, if any. `None` means events are signed only by the vault's
+    /// own custodial key (`keys`), exactly as before this feature existed.
+    pub(crate) writer: Option<VaultKeys>,
 }
 
 const SCHEMA: &str = r#"
@@ -215,6 +238,7 @@ impl Vault {
             root,
             embedder: None,
             embedder_state: EmbedderState::Unresolved,
+            writer: None,
         })
     }
 
@@ -224,10 +248,52 @@ impl Vault {
         home.join(".tabularium").join("models")
     }
 
+    /// Default personal identity location: `~/.tabularium/identity`. A keypair here is reusable
+    /// across any vault (like `~/.ssh/id_ed25519`), separate from any single vault's own key.
+    pub fn identity_dir() -> PathBuf {
+        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+        home.join(".tabularium").join("identity")
+    }
+
+    /// Explicit path, else `TABULARIUM_IDENTITY`, else the default location -- regardless of
+    /// whether a keypair actually lives there yet. Used by `identity init`/`show`, which need to
+    /// know *where* to create or read one.
+    pub fn resolve_identity_path(explicit: Option<&Path>) -> PathBuf {
+        if let Some(p) = explicit {
+            return p.to_path_buf();
+        }
+        if let Ok(v) = std::env::var(ENV_IDENTITY)
+            && !v.trim().is_empty()
+        {
+            return PathBuf::from(v);
+        }
+        Vault::identity_dir()
+    }
+
+    /// Same resolution as [`Vault::resolve_identity_path`], but `None` unless a keypair already
+    /// exists there -- so opening a vault with no identity configured anywhere is a pure no-op and
+    /// stays in today's single-custodian-key mode.
+    pub fn resolve_identity_dir(explicit: Option<&Path>) -> Option<PathBuf> {
+        let dir = Vault::resolve_identity_path(explicit);
+        dir.join(crate::keys::SECRET_FILE).is_file().then_some(dir)
+    }
+
     /// Install (or explicitly disable, with `None`) the embedder. Overrides config resolution.
     pub fn set_embedder(&mut self, embedder: Option<Box<dyn Embedder>>) {
         self.embedder_state = if embedder.is_some() { EmbedderState::Ready } else { EmbedderState::Disabled };
         self.embedder = embedder;
+    }
+
+    /// Install (or clear, with `None`) this process's writer identity. Events appended afterward
+    /// are additionally signed by it and trust-capped by its registry entry (`Policy.writers`);
+    /// `None` (the default) keeps today's behavior of signing only with the vault's own key.
+    pub fn set_writer_identity(&mut self, writer: Option<VaultKeys>) {
+        self.writer = writer;
+    }
+
+    /// This process's writer public key, if an identity is configured.
+    pub fn writer_public_key_hex(&self) -> Option<String> {
+        self.writer.as_ref().map(|k| k.public_key_hex())
     }
 
     /// Resolve the embedder from config on first use. Failures disable embeddings for this
@@ -293,6 +359,17 @@ impl Vault {
 
     pub fn config(&self) -> &VaultConfig {
         &self.config
+    }
+
+    pub fn config_mut(&mut self) -> &mut VaultConfig {
+        &mut self.config
+    }
+
+    /// Persist the current in-memory config back to `vault.toml` (e.g. after editing `writers`).
+    pub fn save_config(&self) -> Result<()> {
+        let toml_text = toml::to_string_pretty(&self.config).map_err(|e| Error::Config(format!("serialize config: {e}")))?;
+        fs::write(self.dir.join(CONFIG_FILE), toml_text)?;
+        Ok(())
     }
 
     pub fn root(&self) -> &Path {
