@@ -27,7 +27,10 @@ def ask(prompt: str, timeout: int = 180, retries: int = 1) -> str:
                 ["claude", "-p"],
                 input=prompt,
                 capture_output=True,
-                text=True,
+                encoding="utf-8",  # not text=True: that defaults to the system codepage
+                # (cp1251 on this machine), which can't encode arbitrary conversation
+                # text (LoCoMo's transcripts contain emoji) -- verified by a real crash.
+                errors="replace",
                 timeout=timeout,
             )
         except subprocess.TimeoutExpired as e:

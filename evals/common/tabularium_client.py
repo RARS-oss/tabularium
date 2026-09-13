@@ -52,13 +52,16 @@ class Vault:
         cmd = [binary(), "--vault", str(path), "--json", "init", "--name", name]
         if root is not None:
             cmd += ["--root", str(root)]
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        proc = subprocess.run(cmd, capture_output=True, encoding="utf-8", errors="replace", timeout=60)
         _check(proc, cmd)
         return cls(path)
 
     def _run(self, *args: str, timeout: int = 60) -> Any:
         cmd = [binary(), "--vault", str(self.path), "--json", *args]
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        # encoding="utf-8", not text=True (which defaults to the system codepage, cp1251 on
+        # this machine): tabularium's own JSON output, and any fact text an eval remembers,
+        # can contain arbitrary Unicode the platform codepage can't represent.
+        proc = subprocess.run(cmd, capture_output=True, encoding="utf-8", errors="replace", timeout=timeout)
         return _check(proc, cmd)
 
     def observe(self, kind: str, content: str, trust: Optional[str] = None, channel: str = "eval") -> dict:
