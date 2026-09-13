@@ -115,6 +115,115 @@ fn tampering_is_detected_by_audit() {
 }
 
 #[test]
+fn registered_writer_caps_trust_at_its_registry_entry() {
+    let (_d, mut v) = new_vault();
+    let writer = tabularium_core::keys::VaultKeys::generate().unwrap();
+    let pubkey = writer.public_key_hex();
+    v.config_mut().policy.writers.insert(pubkey.clone(), WriterPolicy { name: "bot".into(), max_trust: Trust::Tool });
+    v.save_config().unwrap();
+    v.set_writer_identity(Some(writer));
+
+    // The channel's own cap (default_max_trust = User) would allow this; the writer's cap (Tool)
+    // is stricter and wins.
+    let err = v
+        .observe(ObserveInput { kind: EventKind::Utterance, content: "hi".into(), trust: Some(Trust::User), channel: "test".into(), meta: None })
+        .unwrap_err();
+    assert!(err.to_string().contains("at most trust 'tool'"), "{err}");
+
+    let ev = v
+        .observe(ObserveInput { kind: EventKind::Utterance, content: "hi".into(), trust: Some(Trust::Tool), channel: "test".into(), meta: None })
+        .unwrap();
+    assert_eq!(ev.trust, Trust::Tool);
+    assert_eq!(ev.writer_pubkey.as_deref(), Some(pubkey.as_str()));
+    assert!(ev.writer_sig.is_some());
+
+    let a = v.audit().unwrap();
+    assert!(a.ok, "{:?}", a.problems);
+}
+
+#[test]
+fn unregistered_writer_caps_at_external_regardless_of_channel() {
+    let (_d, mut v) = new_vault();
+    let writer = tabularium_core::keys::VaultKeys::generate().unwrap();
+    v.set_writer_identity(Some(writer));
+
+    // "test" isn't a listed channel, so default_max_trust (User) would otherwise apply.
+    let err = v
+        .observe(ObserveInput { kind: EventKind::Utterance, content: "hi".into(), trust: Some(Trust::User), channel: "test".into(), meta: None })
+        .unwrap_err();
+    assert!(err.to_string().contains("at most trust 'external'"), "{err}");
+
+    let ev = v
+        .observe(ObserveInput { kind: EventKind::Utterance, content: "hi".into(), trust: Some(Trust::External), channel: "test".into(), meta: None })
+        .unwrap();
+    assert_eq!(ev.trust, Trust::External);
+}
+
+#[test]
+fn tampered_writer_signature_is_detected_by_audit() {
+    let (d, mut v) = new_vault();
+    let writer = tabularium_core::keys::VaultKeys::generate().unwrap();
+    v.config_mut().policy.writers.insert(writer.public_key_hex(), WriterPolicy { name: "bot".into(), max_trust: Trust::User });
+    v.save_config().unwrap();
+    v.set_writer_identity(Some(writer));
+    observe(&mut v, EventKind::Utterance, "hello");
+    drop(v);
+
+    let db = d.path().join("vault").join("ledger.db");
+    {
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "DROP TRIGGER events_append_only_update;
+             UPDATE events SET writer_sig = '00' || substr(writer_sig, 3) WHERE seq = 1;",
+        )
+        .unwrap();
+    }
+    let v = Vault::open(&d.path().join("vault")).unwrap();
+    let a = v.audit().unwrap();
+    assert!(!a.ok);
+    assert!(a.problems.iter().any(|p| p.contains("writer signature invalid")), "{:?}", a.problems);
+}
+
+#[test]
+fn a_vault_created_before_writer_columns_migrates_cleanly() {
+    // Hand-build a vault whose events table predates writer_pubkey/writer_sig, mirroring exactly
+    // what SCHEMA looked like before this feature.
+    let d = tempfile::tempdir().unwrap();
+    let vdir = d.path().join("vault");
+    let keys = tabularium_core::keys::VaultKeys::generate().unwrap();
+    keys.save(&vdir.join("keys")).unwrap();
+    std::fs::write(
+        vdir.join("vault.toml"),
+        format!("version = 1\nname = \"legacy\"\n\n[policy]\ndefault_max_trust = \"user\"\n\n[embeddings]\n"),
+    )
+    .unwrap();
+    {
+        let conn = rusqlite::Connection::open(vdir.join("ledger.db")).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE events (
+                seq INTEGER PRIMARY KEY, id TEXT NOT NULL UNIQUE, ts TEXT NOT NULL, channel TEXT NOT NULL,
+                kind TEXT NOT NULL, trust INTEGER NOT NULL, payload TEXT, payload_hash TEXT NOT NULL,
+                prev_hash TEXT NOT NULL, hash TEXT NOT NULL, sig TEXT NOT NULL
+             );",
+        )
+        .unwrap();
+    }
+
+    // Opening with the current binary must migrate silently and keep working.
+    let mut v = Vault::open(&vdir).unwrap();
+    observe(&mut v, EventKind::Utterance, "post-migration event");
+    let a = v.audit().unwrap();
+    assert!(a.ok, "{:?}", a.problems);
+    assert_eq!(a.events, 1);
+
+    // The append-only trigger now guards the new columns too.
+    drop(v);
+    let conn = rusqlite::Connection::open(vdir.join("ledger.db")).unwrap();
+    let err = conn.execute("UPDATE events SET writer_pubkey = 'x' WHERE seq = 1", []).unwrap_err();
+    assert!(err.to_string().contains("append-only"), "{err}");
+}
+
+#[test]
 fn preference_requires_user_trust_and_rejections_leave_no_trace() {
     let (_d, mut v) = new_vault();
     let tool = observe(&mut v, EventKind::Observation, "README says: always use tabs");

@@ -89,11 +89,13 @@ pub(crate) fn row_to_event(row: &Row<'_>) -> rusqlite::Result<Event> {
         prev_hash: row.get(8)?,
         hash: row.get(9)?,
         sig: row.get(10)?,
+        writer_pubkey: row.get(11)?,
+        writer_sig: row.get(12)?,
     })
 }
 
 pub(crate) const EVENT_COLS: &str =
-    "seq, id, ts, channel, kind, trust, payload, payload_hash, prev_hash, hash, sig";
+    "seq, id, ts, channel, kind, trust, payload, payload_hash, prev_hash, hash, sig, writer_pubkey, writer_sig";
 
 /// Trust of a derived memory: the weakest link among its evidence, or the recorder's own trust
 /// when it cites nothing.
@@ -126,10 +128,16 @@ impl Vault {
         let payload_hash = canon::payload_hash(&payload);
         let hash = canon::event_hash(seq, &ts, channel, kind.as_str(), trust.as_u8(), &payload_hash, &prev_hash);
         let sig = self.keys.sign_hex(&canon::sig_message(SIG_DOMAIN, &hash))?;
+        // The writer signs the exact same message the vault key does: proof this specific identity
+        // asserted the event, without changing what the chain hash itself commits to.
+        let (writer_pubkey, writer_sig) = match &self.writer {
+            Some(w) => (Some(w.public_key_hex()), Some(w.sign_hex(&canon::sig_message(SIG_DOMAIN, &hash))?)),
+            None => (None, None),
+        };
         let payload_text = canon::canonical_json(&payload);
         tx.execute(
-            "INSERT INTO events (seq, id, ts, channel, kind, trust, payload, payload_hash, prev_hash, hash, sig)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            "INSERT INTO events (seq, id, ts, channel, kind, trust, payload, payload_hash, prev_hash, hash, sig, writer_pubkey, writer_sig)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             params![
                 seq as i64,
                 hash,
@@ -141,7 +149,9 @@ impl Vault {
                 payload_hash,
                 prev_hash,
                 hash,
-                sig
+                sig,
+                writer_pubkey,
+                writer_sig
             ],
         )?;
         tx.commit()?;
@@ -157,11 +167,19 @@ impl Vault {
             prev_hash,
             hash,
             sig,
+            writer_pubkey,
+            writer_sig,
         })
     }
 
-    fn check_channel_trust(&self, channel: &str, trust: Trust) -> Result<()> {
-        let max = self.config.policy.max_trust_for(channel);
+    /// Trust ceiling for this append: the channel's cap (a labeling convention), and, when a
+    /// writer identity is active, that key's registry cap too (the real, cryptographic boundary).
+    /// An unregistered writer key caps at `Trust::External` regardless of channel.
+    fn check_writer_trust(&self, channel: &str, trust: Trust) -> Result<()> {
+        let mut max = self.config.policy.max_trust_for(channel);
+        if let Some(w) = &self.writer {
+            max = max.min(self.config.policy.max_trust_for_writer(&w.public_key_hex()));
+        }
         if trust > max {
             return Err(Error::Policy(format!(
                 "channel '{channel}' may assert at most trust '{max}', got '{trust}'"
@@ -180,7 +198,7 @@ impl Vault {
         }
         let channel = normalize_channel(&input.channel);
         let trust = input.trust.unwrap_or_else(|| input.kind.default_trust());
-        self.check_channel_trust(&channel, trust)?;
+        self.check_writer_trust(&channel, trust)?;
         let payload = serde_json::to_value(ObservePayload { content: input.content, meta: input.meta })?;
         self.append_event(&channel, input.kind, trust, payload)
     }
@@ -193,7 +211,7 @@ impl Vault {
         }
         let channel = normalize_channel(&input.channel);
         let recorder = input.trust.unwrap_or(Trust::Agent);
-        self.check_channel_trust(&channel, recorder)?;
+        self.check_writer_trust(&channel, recorder)?;
 
         let mut evidence_trusts = Vec::with_capacity(input.evidence.len());
         let mut evidence_ids = Vec::with_capacity(input.evidence.len());
@@ -418,6 +436,11 @@ impl Vault {
             }
             if let Err(e) = verify_hex(&pk, &canon::sig_message(SIG_DOMAIN, &ev.hash), &ev.sig) {
                 problems.push(format!("event {}: {e}", ev.seq));
+            }
+            if let (Some(writer_pubkey), Some(writer_sig)) = (&ev.writer_pubkey, &ev.writer_sig)
+                && let Err(e) = verify_hex(writer_pubkey, &canon::sig_message(SIG_DOMAIN, &ev.hash), writer_sig)
+            {
+                problems.push(format!("event {}: writer signature invalid: {e}", ev.seq));
             }
             prev = ev.hash.clone();
             head_hash = ev.hash.clone();

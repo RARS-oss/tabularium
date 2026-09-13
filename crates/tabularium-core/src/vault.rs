@@ -109,18 +109,10 @@ CREATE TABLE IF NOT EXISTS events (
     payload_hash TEXT NOT NULL,
     prev_hash    TEXT NOT NULL,
     hash         TEXT NOT NULL,
-    sig          TEXT NOT NULL
+    sig          TEXT NOT NULL,
+    writer_pubkey TEXT,
+    writer_sig    TEXT
 );
-CREATE TRIGGER IF NOT EXISTS events_append_only_update BEFORE UPDATE ON events
-BEGIN
-    SELECT CASE WHEN NOT (
-        NEW.payload IS NULL
-        AND NEW.seq = OLD.seq AND NEW.id = OLD.id AND NEW.ts = OLD.ts
-        AND NEW.channel = OLD.channel AND NEW.kind = OLD.kind AND NEW.trust = OLD.trust
-        AND NEW.payload_hash = OLD.payload_hash AND NEW.prev_hash = OLD.prev_hash
-        AND NEW.hash = OLD.hash AND NEW.sig = OLD.sig
-    ) THEN RAISE(ABORT, 'events are append-only; only payload redaction is allowed') END;
-END;
 CREATE TRIGGER IF NOT EXISTS events_append_only_delete BEFORE DELETE ON events
 BEGIN
     SELECT RAISE(ABORT, 'events are append-only');
@@ -157,6 +149,45 @@ CREATE TABLE IF NOT EXISTS embeddings (
     vector    BLOB NOT NULL
 );
 "#;
+
+/// `events_append_only_update`'s definition, kept out of `SCHEMA` and always (re)created
+/// explicitly in `open()` -- `CREATE TRIGGER IF NOT EXISTS` is a no-op on a vault that already has
+/// it, which would silently leave an *older* definition (missing the writer columns' equality
+/// check) in place on any vault that predates this feature.
+const APPEND_ONLY_TRIGGER_SQL: &str = r#"
+CREATE TRIGGER events_append_only_update BEFORE UPDATE ON events
+BEGIN
+    SELECT CASE WHEN NOT (
+        NEW.payload IS NULL
+        AND NEW.seq = OLD.seq AND NEW.id = OLD.id AND NEW.ts = OLD.ts
+        AND NEW.channel = OLD.channel AND NEW.kind = OLD.kind AND NEW.trust = OLD.trust
+        AND NEW.payload_hash = OLD.payload_hash AND NEW.prev_hash = OLD.prev_hash
+        AND NEW.hash = OLD.hash AND NEW.sig = OLD.sig
+        AND NEW.writer_pubkey IS OLD.writer_pubkey AND NEW.writer_sig IS OLD.writer_sig
+    ) THEN RAISE(ABORT, 'events are append-only; only payload redaction is allowed') END;
+END;
+"#;
+
+fn ensure_append_only_trigger(conn: &Connection) -> Result<()> {
+    conn.execute_batch("DROP TRIGGER IF EXISTS events_append_only_update;")?;
+    conn.execute_batch(APPEND_ONLY_TRIGGER_SQL)?;
+    Ok(())
+}
+
+/// Add `writer_pubkey`/`writer_sig` to a vault's `events` table created before this feature
+/// existed. `SCHEMA`'s `CREATE TABLE IF NOT EXISTS` already covers brand-new vaults; this is a
+/// no-op there (`ALTER TABLE ADD COLUMN` fails with "duplicate column name", which is caught and
+/// ignored -- any other failure is real and propagates).
+fn migrate_events_writer_columns(conn: &Connection) -> Result<()> {
+    for stmt in ["ALTER TABLE events ADD COLUMN writer_pubkey TEXT", "ALTER TABLE events ADD COLUMN writer_sig TEXT"] {
+        if let Err(e) = conn.execute(stmt, [])
+            && !e.to_string().contains("duplicate column name")
+        {
+            return Err(e.into());
+        }
+    }
+    Ok(())
+}
 
 impl Vault {
     /// Default vault location: `~/.tabularium/default`.
@@ -223,6 +254,8 @@ impl Vault {
         conn.pragma_update(None, "synchronous", "FULL")?;
         conn.pragma_update(None, "busy_timeout", 5000)?;
         conn.execute_batch(SCHEMA)?;
+        migrate_events_writer_columns(&conn)?;
+        ensure_append_only_trigger(&conn)?;
         let root = match &config.root {
             Some(r) => {
                 let p = PathBuf::from(r);

@@ -214,8 +214,16 @@ pub struct Event {
     pub payload_hash: String,
     pub prev_hash: String,
     pub hash: String,
-    /// Ed25519 signature over the domain-tagged hash, hex encoded.
+    /// Ed25519 signature over the domain-tagged hash, hex encoded -- the vault's own custodial key.
     pub sig: String,
+    /// Hex public key of the writer identity that additionally signed this event, if any. `None`
+    /// means only the vault's own key vouches for it (today's behavior, unchanged).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub writer_pubkey: Option<String>,
+    /// The writer's own signature over the same `hash` the vault key signs -- proof this specific
+    /// identity, not just "whoever had the vault key," asserted this event.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub writer_sig: Option<String>,
 }
 
 /// Payload of a [`EventKind::Derive`] event.
