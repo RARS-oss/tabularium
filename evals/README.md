@@ -1,8 +1,11 @@
 # evals
 
-Python black-box harness for the H1-H4 claims in `docs/DESIGN.md` §3. Every suite drives the
-real `tabularium` binary through its `--json` CLI output (`common/tabularium_client.py`) against
-a throwaway scratch vault (`common/scratch_vault.py`) -- never `~/.tabularium/default`.
+Python black-box harness for the H1-H4 claims in `docs/DESIGN.md` §3, plus follow-up suites for
+specific risks and questions raised in review. Every suite drives the real `tabularium` binary
+through its `--json` CLI output (`common/tabularium_client.py`) or a raw JSON-RPC session over
+`tabularium serve` (`common/mcp_stdio_client.py`, for measuring warm-process latency the CLI path
+can't) against a throwaway scratch vault (`common/scratch_vault.py`) -- never
+`~/.tabularium/default`.
 
 ## Setup
 
@@ -24,14 +27,20 @@ everything uses the Python 3.12 standard library only.
 | `injection/` (H2) | no | built and run |
 | `locomo/` (H3, LoCoMo half) | claude -p only (dataset is bundled in-repo upstream) | built and run, pilot scale |
 | `longmemeval/` (H3, LongMemEval half) | dataset download (~277MB) + claude -p | loader built, **not run** this session |
+| `staleness/refactor_robustness.py` (H1 follow-up) | no | built and run |
+| `scale/` (risk-review follow-up) | no | built and run |
+| `language/` (risk-review follow-up) | no | built and run |
 
 Run any suite directly, e.g.:
 
 ```sh
 python staleness/run.py
+python staleness/refactor_robustness.py
 python determinism/run.py
 python injection/run.py
 python locomo/run.py [n_conversations] [n_questions_per_conversation]   # defaults 1, 10
+python scale/run.py
+python language/ru_en_rrf.py
 ```
 
 Each writes its result to `results/<suite>.json` (gitignored) and exits nonzero if its `all_pass`
@@ -61,6 +70,24 @@ now fails under the *unmodified* default policy -- every vault is protected, not
 owner remembers to harden. See `injection/run.py`'s `finding` field, or the paper skeleton, for
 the full writeup; the corpus keeps this attack as a permanent regression check.
 
+## Risk-review follow-ups (see `evals/paper/skeleton.md` §3.5 for the full writeup)
+
+Three specific questions from an external review, checked rather than argued:
+
+- **Mass-refactor false positives** (`staleness/refactor_robustness.py`): `file_hash` flags 100%
+  of purely-cosmetic reformats as stale (byte-exact by design); `symbol_in_file` flags 0% of the
+  same reformats while still catching 100% of genuine renames. Prefer `symbol_in_file` unless the
+  claim really is about exact bytes.
+- **Latency at scale** (`scale/run.py`): a cold CLI call pays the ONNX model's load cost every
+  time (1.34s mean); a long-lived MCP session pays it once at startup (1.20s) and every call after
+  is warm (16-22ms). Recall latency at 3200 active memories is still 48ms (sub-linear growth from
+  50 memories' 13.6ms) -- the real cost the review named is specifically CLI-per-call usage, not
+  recall's own scan.
+- **Cross-language recall quality** (`language/ru_en_rrf.py`): real, but with a real gap --
+  same-language MRR 0.95 vs. cross-language MRR 0.325 on a mixed 20-memory RU/EN vault with the
+  real ONNX embedder. The README's "ask in Russian, find English" line now points here instead of
+  implying parity.
+
 ## Layout
 
 ```
@@ -69,8 +96,9 @@ common/
   scratch_vault.py        throwaway vault + pinned check-path root, guaranteed cleanup
   claude_headless.py       subprocess wrapper over `claude -p`, UTF-8 explicit, stdin not argv
   llm_pipeline.py           extract / answer / judge prompts, shared by locomo/ and (eventually) longmemeval/
-staleness/, determinism/, injection/, locomo/, longmemeval/    one suite each
+  mcp_stdio_client.py       raw JSON-RPC over `tabularium serve`, for warm-process latency measurements
+staleness/, determinism/, injection/, locomo/, longmemeval/, scale/, language/    one suite each
 data/       downloaded datasets (gitignored)
 results/    run outputs (gitignored)
-paper/      skeleton.md -- the H1-H4 write-up with real numbers from the runs above
+paper/      skeleton.md -- the H1-H4 write-up (plus §3.5 follow-ups) with real numbers from the runs above
 ```

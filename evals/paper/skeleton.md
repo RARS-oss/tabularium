@@ -133,6 +133,69 @@ identical, rebuild identical, audit clean throughout. **100%**, confirming H4 at
 independent black-box check from outside the binary (the Rust suite's own
 `compile_is_deterministic_across_rebuild_and_copy` asserts the same property from inside).
 
+### Supplementary checks (external review response)
+
+Three specific risks raised in review, checked with real runs rather than argued from first
+principles.
+
+**Refactor false positives** (`staleness/refactor_robustness.py`). Does `verify` throw a wave of
+*false* staleness on a mass refactor, where the underlying fact is still true but a check trips
+anyway? Split by check type (n=10 files each, half pure-cosmetic reformat, half a genuine rename):
+
+| check type | false-positive rate (cosmetic reformat) | true-positive rate (genuine rename) |
+|---|---|---|
+| `file_hash` | **100%** | 100% |
+| `symbol_in_file` | **0%** | 100% |
+
+`file_hash` is byte-exact by design: any reformat (gofmt/rustfmt/prettier-style) trips every memory
+checking that file, whether or not the reformat touched anything the memory is actually about.
+`symbol_in_file`'s substring test survives reformatting while still catching a real rename.
+**Recommendation, now backed by data, not just written into the CLI's own `--help` text:** prefer
+`symbol_in_file` for "this identifier exists somewhere in this file" claims; reserve `file_hash`
+for claims that are genuinely about the file's exact bytes.
+
+**Latency at scale** (`scale/run.py`). Every CLI invocation is a fresh process, so the ONNX
+embedder loads from scratch every time: **1.34s mean** per `remember` (n=5). A long-lived MCP
+session (`tabularium serve`) pays that cost exactly once, at startup (**1.20s**, spent before the
+server answers its first JSON-RPC message at all) -- every tool call after that, including the
+first, is already warm (**16-22ms**). Recall latency vs. active-memory count (all warm, via the
+same long-lived session):
+
+| vault size | mean recall time |
+|---|---|
+| 50 | 13.6ms |
+| 200 | 14.3ms |
+| 800 | 19.2ms |
+| 3200 | 48.4ms |
+
+A 64x increase in vault size produced a 3.6x increase in recall time -- sub-linear in practice at
+this range, not the naive O(n) one might fear from "two exact rankings, no approximate index"
+(DESIGN.md 2.5's own deliberate reproducibility trade-off: an ANN index's build order or
+floating-point path could break H4's "identical across runs and machines" guarantee). The real
+risk the review correctly named is specifically CLI-driven usage (a fresh process per call, e.g. a
+host that shells out instead of holding an MCP session open) -- 1.3s per call there is a real cost
+a long-lived session avoids entirely, not a small one.
+
+**Cross-language recall quality** (`language/ru_en_rrf.py`). The README claims "ask in Russian,
+find what was saved in English." True, but the claim understates the real gap: 10 topics recorded
+in English and 10 different topics in Russian, one mixed 20-memory vault, each topic queried both
+in its own language and the other, real local ONNX embeddings throughout (not the deterministic
+test embedder):
+
+| condition | top-1 accuracy | found within budget | MRR |
+|---|---|---|---|
+| same-language (en->en / ru->ru) | 90% | 100% | 0.95 |
+| cross-language (ru->en / en->ru) | **5%** | 65% | **0.325** |
+
+Cross-language retrieval almost never wins rank 1 (usually rank 2, edged out by a same-language
+decoy that shares no real relevance but picks up incidental BM25 token overlap RRF still credits),
+and misses the target within budget entirely 35% of the time. The claim "it works" is true --
+cross-language recall is never zero, and correctly-recalled items nearly always beat chance -- but
+"works" and "works about as well as same-language" are different claims, and only the first one
+holds at this scale. Worth a real fix candidate for later: weighting the semantic rank more heavily
+relative to BM25 specifically when the query and candidate scripts differ, rather than treating
+this as a closed claim.
+
 ## 4. Limitations
 
 - H1, H2, H4 are real but small-n (10 facts, 7 attacks, 3 trials); no claim these are
@@ -146,6 +209,12 @@ independent black-box check from outside the binary (the Rust suite's own
   automatically -- but it was validated against this session's own 7-attack corpus, not an
   independent one; broader adversarial coverage (real AgentPoison/MINJA payloads replayed
   verbatim) would strengthen the claim further.
+- Cross-language recall's real gap (MRR 0.325 vs. 0.95 same-language, §3.5) is not yet fixed, only
+  measured -- the README's "ask in Russian, find English" property line is accurate about
+  direction, not magnitude, until this is addressed.
+- The 3200-memory scale test is still a single vault shape (short, English/Russian facts, no
+  checks); a vault with many checked memories would additionally pay `verify`'s per-check I/O cost
+  at recall time, not measured here.
 
 ## 5. Related work
 
