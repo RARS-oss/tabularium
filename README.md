@@ -74,7 +74,7 @@ Set `TABULARIUM_NO_EMBED=1` to force lexical-only for a process; hooks always ru
 ```sh
 tabularium identity init                          # ~/.tabularium/identity, reusable across vaults
 tabularium identity show                           # hand this public key to the vault owner
-tabularium writer add <pubkey> --name daniil --max-trust user   # vault owner registers it
+tabularium writer add <pubkey> --name alice --max-trust user   # vault owner registers it
 tabularium writer list
 tabularium --identity ~/.tabularium/identity observe --kind utterance "..."  # now signs as that writer
 ```
@@ -102,13 +102,14 @@ crates/tabularium-mcp    JSON-RPC/stdio MCP server, no async runtime
 crates/tabularium        CLI + `serve`
 integrations/claude-code example .mcp.json and hooks
 docs/DESIGN.md           the design and the research claims
-evals/                   benchmark harness (Python), coming
+evals/                   Python benchmark harness: H1-H4 against DESIGN.md's claims
 ```
 
 ## Status
 
 v0.2: core, stored embeddings and hybrid recall, contradiction and duplicate detection, explicit merge,
-evidence redaction, and shared vaults with per-key trust. See `docs/DESIGN.md` for the roadmap: a
-Python eval harness and benchmarks next (Week 4), then a GUI timeline further out.
+evidence redaction, shared vaults with per-key trust, and a Python eval harness against DESIGN.md's
+H1-H4 claims (`evals/`, real pilot-scale numbers in `evals/paper/skeleton.md`). See `docs/DESIGN.md`
+for what's next: a GUI timeline, HTTP transport, and the portfolio projects this one unblocks.
 
 License: MIT OR Apache-2.0.

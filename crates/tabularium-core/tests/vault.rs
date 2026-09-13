@@ -795,12 +795,12 @@ fn open_requires_init_and_init_refuses_double() {
 fn writer_registry_round_trips_through_vault_toml() {
     let (dir, mut v) = new_vault();
     let pubkey = "abc123".to_string();
-    v.config_mut().policy.writers.insert(pubkey.clone(), WriterPolicy { name: "daniil".into(), max_trust: Trust::User });
+    v.config_mut().policy.writers.insert(pubkey.clone(), WriterPolicy { name: "alice".into(), max_trust: Trust::User });
     v.save_config().unwrap();
 
     let reopened = Vault::open(&dir.path().join("vault")).unwrap();
     let w = reopened.config().policy.writers.get(&pubkey).unwrap();
-    assert_eq!(w.name, "daniil");
+    assert_eq!(w.name, "alice");
     assert_eq!(w.max_trust, Trust::User);
     assert_eq!(reopened.config().policy.max_trust_for_writer(&pubkey), Trust::User);
     assert_eq!(reopened.config().policy.max_trust_for_writer("unregistered"), Trust::External, "unknown key is capped at the safe default");

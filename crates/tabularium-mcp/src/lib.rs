@@ -760,13 +760,13 @@ mod tests {
 
         let writer = tabularium_core::keys::VaultKeys::generate().unwrap();
         let pubkey = writer.public_key_hex();
-        s.vault_mut().config_mut().policy.writers.insert(pubkey.clone(), WriterPolicy { name: "daniil".into(), max_trust: Trust::User });
+        s.vault_mut().config_mut().policy.writers.insert(pubkey.clone(), WriterPolicy { name: "alice".into(), max_trust: Trust::User });
         s.vault_mut().save_config().unwrap();
         s.vault_mut().set_writer_identity(Some(writer));
 
         let with_writer = call(&mut s, 2, "memory_info", json!({}));
         assert_eq!(with_writer["structuredContent"]["writer"]["public_key"], pubkey);
-        assert_eq!(with_writer["structuredContent"]["writer"]["registered_name"], "daniil");
+        assert_eq!(with_writer["structuredContent"]["writer"]["registered_name"], "alice");
     }
 
     #[test]
