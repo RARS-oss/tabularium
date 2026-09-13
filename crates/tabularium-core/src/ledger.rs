@@ -297,6 +297,11 @@ impl Vault {
     /// Redact the payload of each evidence event in `candidates` that no other *active* memory
     /// (besides `forgetting`, whose own view row is still active at this point) still cites. The
     /// memories view is read as-is: not yet updated for this forget, since `compile` hasn't run.
+    ///
+    /// Only ever touches raw ingestion events (`Utterance`/`Observation`/`Action`/`External`).
+    /// `evidence` can also cite another memory's own derive event -- citing it doesn't give this
+    /// forget any authority over *that* memory's independent lifecycle, so a `Derive` (or
+    /// `Forget`/`Embed`) candidate is left alone; it's only ever redacted by its own `forget`.
     fn redact_orphaned_evidence(&mut self, candidates: &[String], forgetting: &str) -> Result<Vec<String>> {
         if candidates.is_empty() {
             return Ok(Vec::new());
@@ -306,6 +311,10 @@ impl Vault {
         for id in candidates {
             let still_cited = active.iter().any(|m| m.id != forgetting && m.evidence.iter().any(|e| e == id));
             if still_cited {
+                continue;
+            }
+            let Some(ev) = self.get_event(id)? else { continue };
+            if !matches!(ev.kind, EventKind::Utterance | EventKind::Observation | EventKind::Action | EventKind::External) {
                 continue;
             }
             let n = self.conn.execute("UPDATE events SET payload = NULL WHERE id = ?1 AND payload IS NOT NULL", [id])?;

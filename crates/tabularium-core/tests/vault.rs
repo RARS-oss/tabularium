@@ -200,6 +200,24 @@ fn contradictions_finds_drifted_subjects_and_signs_a_receipt() {
 }
 
 #[test]
+fn forget_never_redacts_a_cited_memorys_own_record() {
+    // A memory's id is its own derive event's id, so it's a valid (if unusual) evidence citation.
+    // Forgetting the citing memory must never reach into the cited memory's independent lifecycle.
+    let (_d, mut v) = new_vault();
+    let base = v.remember(remember_in(MemoryKind::Fact, "base fact, cited by another memory", vec![])).unwrap();
+    let citing = v.remember(remember_in(MemoryKind::Fact, "derived claim", vec![base.id.clone()])).unwrap();
+
+    let report = v.forget(&citing.id, "cleanup", "test").unwrap();
+    assert!(report.evidence_redacted.is_empty(), "a Derive-kind citation must never be auto-redacted: {:?}", report.evidence_redacted);
+
+    let base_now = v.get_memory(&base.id).unwrap().unwrap();
+    assert!(!base_now.tombstoned, "the cited memory's own lifecycle is untouched");
+    assert_eq!(base_now.text, "base fact, cited by another memory");
+    let base_event = v.get_event(&base.id).unwrap().unwrap();
+    assert!(base_event.payload.is_some(), "the cited memory's derive payload must survive");
+}
+
+#[test]
 fn forget_redacts_evidence_orphaned_by_it_but_not_evidence_still_cited() {
     let (_d, mut v) = new_vault();
     let shared_ev = observe(&mut v, EventKind::Utterance, "shared evidence, cited twice");
