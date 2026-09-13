@@ -197,7 +197,19 @@ impl Vault {
             return Err(Error::Invalid("content is empty".into()));
         }
         let channel = normalize_channel(&input.channel);
-        let trust = input.trust.unwrap_or_else(|| input.kind.default_trust());
+        // `trust` may only *downgrade* from what `kind` itself implies, never raise above it --
+        // an "observation" (tool output) cannot become a "user" utterance just because the
+        // caller claims so. Without this, a channel with no restrictions at all (the shipped
+        // default) lets any caller spoof user trust on non-utterance content and get it cited
+        // into a preference/instruction; found empirically in evals/injection/run.py.
+        let ceiling = input.kind.default_trust();
+        let trust = input.trust.unwrap_or(ceiling);
+        if trust > ceiling {
+            return Err(Error::Policy(format!(
+                "kind '{}' may assert at most trust '{ceiling}', got '{trust}' (only 'utterance' defaults to user trust)",
+                input.kind
+            )));
+        }
         self.check_writer_trust(&channel, trust)?;
         let payload = serde_json::to_value(ObservePayload { content: input.content, meta: input.meta })?;
         self.append_event(&channel, input.kind, trust, payload)

@@ -48,16 +48,18 @@ pattern to LongMemEval is a mechanical follow-up (swap `locomo_dataset.py` for
 `haystack_sessions` instead of LoCoMo's `session_N` keys), not a design change -- just more
 wall-clock time than this session spent on it.
 
-## Injection eval's own finding
+## Injection eval's own finding (fixed)
 
-`injection/run.py` found that a fresh `tabularium init` ships with an empty channel policy, under
-which one attack in the corpus succeeds (`observe --trust user` on tool-output content, then
-cited into an instruction). It also found that the *obvious* fix -- capping the channel at Tool
-trust -- breaks the system's own primary workflow (turning a real user utterance into a
-preference) along with the attack, and that capping at Agent instead closes the gap for free. See
-`injection/run.py`'s `finding` field, or the paper skeleton, for the full writeup. This is a
-finding about the *shipped default* `vault.toml`, not a code bug -- whether to harden the real
-default is a separate decision from this eval work.
+`injection/run.py` originally found that a fresh `tabularium init`'s empty channel policy let one
+attack in the corpus succeed (`observe --trust user` on tool-output content, then cited into an
+instruction). The obvious fix -- capping the channel at Tool trust -- turned out to break the
+system's own primary workflow (turning a real user utterance into a preference) along with the
+attack, since `remember()`'s channel check runs on the recorder's fixed Agent default before
+evidence is even resolved. The actual fix landed in `Vault::observe` (`ledger.rs`), not config: a
+trust override may only downgrade from `kind.default_trust()`, never raise above it, so the attack
+now fails under the *unmodified* default policy -- every vault is protected, not just ones an
+owner remembers to harden. See `injection/run.py`'s `finding` field, or the paper skeleton, for
+the full writeup; the corpus keeps this attack as a permanent regression check.
 
 ## Layout
 

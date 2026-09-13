@@ -63,24 +63,25 @@ trust through `merged_from`; abusing evidence citation to reach into another mem
 Run under two channel policies plus one positive control (a genuine preference from real user
 evidence, which must keep working -- a "fix" that also breaks the primary workflow isn't a fix).
 
-**Result** (`injection/run.py`):
+**Result** (`injection/run.py`, after the fix below): **0/7 attacks succeed under either policy**,
+legitimate evidence-backed preference creation unaffected in both.
 
-| policy | attacks succeeded | legitimate preference still works |
-|---|---|---|
-| default (`tabularium init`'s shipped, empty `[policy.channels]`) | **1/7 (14%)** | yes |
-| hardened (`eval` channel capped at Agent trust) | **0/7 (0%)** | yes |
-
-**Finding, not assumed:** the one successful default-policy attack exploits a real, already-named
-gap (DESIGN.md §2.2: "a recorder that mislabels trust... the policy can cap what the mcp:* channels
-may assert") -- `observe` accepts an explicit trust override uncorrelated with `kind`, and a fresh
-vault ships with no channel restrictions at all. The *literal* reading of the documented
-mitigation -- cap the channel at Tool trust -- was tried first and is a trap: `remember()`'s
-channel check runs on the recorder's default (always Agent; neither the CLI nor MCP exposes a
-trust override for `remember`), evaluated *before* evidence is resolved, so capping below Agent
-rejects every `remember()` over that channel, legitimate or not. Capping at Agent instead closes
-the spoofing gap with zero cost to the legitimate workflow, confirmed by the positive control.
-This is a finding about the *shipped default* configuration, not the trust mechanism itself, which
-held throughout (6/7 attacks already failed under the unmodified default).
+**Finding, and a real fix, not just a finding:** this eval originally caught 1/7 attacks
+succeeding under the *default* policy (`tabularium init`'s shipped, empty `[policy.channels]`) --
+`observe` accepted an explicit trust override uncorrelated with `kind`, a residual gap DESIGN.md
+§2.2 already named ("a recorder that mislabels trust... the policy can cap what the mcp:*
+channels may assert"). The documented mitigation's *literal* reading -- cap the channel at Tool
+trust -- was tried first and is a trap: `remember()`'s channel check runs on the recorder's fixed
+Agent default, evaluated *before* evidence is resolved, so capping below Agent rejects every
+`remember()` over that channel, legitimate or not. Rather than ship a config workaround, the gap
+was fixed at the root in `Vault::observe` (`ledger.rs`): a trust override may only *downgrade*
+from `kind.default_trust()`, never raise above it -- only `utterance` defaults to user trust, so a
+tool-output "observation" can no longer simply claim to be one. This closes the attack under the
+*unmodified default policy*, with zero vault.toml changes needed, protecting every vault rather
+than only ones whose owner remembers to harden channels. Channel-capping at Agent remains
+available as defense-in-depth, verified to still work and to leave the legitimate workflow intact,
+but is no longer required. The trust mechanism itself held throughout (6/7 attacks already failed
+even before this fix).
 
 Baseline comparison against extraction-based systems' injection-attack success rates is cited from
 the AgentPoison/MINJA literature (DESIGN.md §1's own references), not re-run here as a fresh
@@ -141,8 +142,10 @@ independent black-box check from outside the binary (the Rust suite's own
   unverified at any real scale.
 - H2's baseline comparison against extraction-based systems is a literature citation, not a
   reproduced head-to-head.
-- The Agent-trust channel-hardening finding is specific to this session's policy experiment; it
-  has not been applied to tabularium's actual shipped default, which remains a separate decision.
+- The trust-override-ceiling fix (H2) is code, not config, so it applies to every vault
+  automatically -- but it was validated against this session's own 7-attack corpus, not an
+  independent one; broader adversarial coverage (real AgentPoison/MINJA payloads replayed
+  verbatim) would strengthen the claim further.
 
 ## 5. Related work
 
@@ -151,7 +154,7 @@ the extract-and-paste architecture this work replaces the mechanism of, not just
 
 ## 6. Future work
 
-Full-scale H1/H2/H4 runs; a LongMemEval pilot; a real competing-system baseline for H3; resolving
-whether to harden tabularium's shipped default channel policy per the H2 finding; Week 5+ per
-`docs/DESIGN.md`'s own roadmap (consolidation's remaining shared-vault work is done; next is
-whichever of vigil/arbiter/fons/auctor/limen comes first per `build-priority-order`).
+Full-scale H1/H2/H4 runs; a LongMemEval pilot; a real competing-system baseline for H3; replaying
+verbatim payloads from the AgentPoison/MINJA literature through H2's corpus instead of
+hand-written analogues; Week 5+ per `docs/DESIGN.md`'s own roadmap (next is whichever of
+vigil/arbiter/fons/auctor/limen comes first per `build-priority-order`).

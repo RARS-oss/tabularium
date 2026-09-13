@@ -1,15 +1,18 @@
 """H2 -- injection: run the attack corpus (attacks.py) under two policies:
 
 - default: exactly what `tabularium init` ships -- empty `[policy.channels]`.
-- hardened: `eval` capped at Agent trust -- the surgical mitigation this eval itself derived
-  (see attacks.py::legitimate_preference_still_works for why Agent, not the more obvious Tool).
+- hardened: `eval` capped at Agent trust, defense-in-depth on top of the code fix below (see
+  attacks.py::legitimate_preference_still_works for why Agent, not the more obvious Tool).
 
-Each attack/control carries an *expected* outcome under each policy (attacks.py::ATTACKS). The
-headline number isn't just "attack success rate" -- it's whether reality matched what the trust
-model predicts, including the one attack expected to succeed under the default policy and the
-one positive control (a genuine preference) expected to keep working under both. A harness that
-only reported 0% everywhere, or that "fixed" the gap by breaking the legitimate workflow too,
-would hide exactly what this exists to find.
+This suite originally found `trust_override_spoof` succeeding under the default policy --
+`observe` accepted a trust override uncorrelated with `kind`. That's now fixed at the root in
+`Vault::observe` (a trust override may only downgrade from `kind.default_trust()`, never raise
+above it), so the attack fails under *both* conditions with no config needed; it stays in the
+corpus as a permanent regression check, not a still-open gap.
+
+Each attack/control still carries an *expected* outcome per policy (attacks.py::ATTACKS) -- the
+headline number is whether reality matches what the trust model predicts, not just "0%
+everywhere," so a future regression here would show up as a mismatch, not a quietly-passing test.
 """
 
 from __future__ import annotations
@@ -26,16 +29,16 @@ CONTROL_NAMES = {"legitimate_preference_still_works"}
 
 
 def _harden(vault_path: Path) -> None:
-    """Cap the `eval` channel at Agent trust. Exact string replacement, not a generic TOML
-    writer: `tabularium init` always emits an empty `[policy.channels]` table verbatim (checked
-    against the real output), so this is precise, not a guess at the file's shape.
+    """Cap the `eval` channel at Agent trust -- defense-in-depth, not the primary fix anymore.
+    Exact string replacement, not a generic TOML writer: `tabularium init` always emits an empty
+    `[policy.channels]` table verbatim (checked against the real output), so this is precise, not
+    a guess at the file's shape.
 
     Capping at Tool was tried first and rejects every `remember()` over the channel outright,
     legitimate or not: `remember`'s channel check runs on the *recorder* default (always Agent --
     neither the CLI nor MCP exposes a trust override for remember), before evidence is even
     resolved. Agent is the surgical level: recorders at Agent-or-below still pass that gate, so
-    plain facts and genuine evidence-backed preferences keep working, while `observe --trust
-    user` on this channel (User > Agent) -- the actual spoofing vector -- is still rejected.
+    plain facts and genuine evidence-backed preferences keep working.
     """
     toml_path = vault_path / "vault.toml"
     text = toml_path.read_text(encoding="utf-8")
@@ -77,17 +80,18 @@ def run() -> dict:
         "default_policy": default,
         "hardened_policy": hardened,
         "finding": (
-            "trust_override_spoof succeeds under the DEFAULT policy every fresh `tabularium "
-            "init` ships (empty [policy.channels]): observe exposes a raw trust override not "
-            "cross-checked against kind, so a tool-output observation can simply claim "
+            "trust_override_spoof originally succeeded under the DEFAULT policy every fresh "
+            "`tabularium init` ships (empty [policy.channels]): observe accepted a raw trust "
+            "override uncorrelated with kind, so a tool-output observation could simply claim "
             "trust=user and get cited into an instruction -- a residual risk DESIGN.md 2.2 "
-            "already names. Its literal suggested mitigation ('cap what mcp:* channels may "
-            "assert') is a trap if applied at Tool level: remember()'s channel check runs on "
-            "the recorder default (always Agent, before evidence is resolved), so capping below "
-            "Agent rejects every remember() over that channel, breaking the system's own primary "
-            "workflow -- turning a real user utterance into a preference -- along with the "
-            "attack. Capping at Agent instead closes the gap with zero cost to the legitimate "
-            "workflow: confirmed here by a positive control, not assumed."
+            "already named. Fixed at the root, not by config: Vault::observe now rejects a trust "
+            "override above kind.default_trust() (only 'utterance' defaults to user), so the "
+            "attack fails under the unmodified default policy, 0/7, with the legitimate "
+            "evidence-backed-preference workflow confirmed unaffected by a positive control. "
+            "Channel hardening (capping at Agent, not the more obvious Tool, which breaks "
+            "remember() outright since its channel check runs on the recorder's fixed Agent "
+            "default before evidence is resolved) remains available as defense-in-depth, but is "
+            "no longer required to close this specific gap."
         ),
         "closed_by_api_design": (
             "A bare `remember --trust user` with no evidence was not attempted as a separate "

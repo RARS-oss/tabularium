@@ -36,8 +36,14 @@ enforced before anything touches the ledger and re-checked on replay.
 
 This is a structural claim, not a prompt: no sequence of untrusted inputs can produce an instruction.
 The residual risk is a recorder that mislabels trust (an agent claiming a tool output was a user
-utterance). That is why events carry a `channel`, why hooks that observe the real user prompt run
-outside the model, and why the policy can cap what the `mcp:*` channels may assert.
+utterance) -- `observe` closes the direct form of this structurally: a trust override can only
+downgrade from `kind.default_trust()` (only `utterance` defaults to `user`), never raise above it,
+so an "observation" cannot simply claim to be one (found and fixed via `evals/injection/`; a
+tool-output observation spoofing `trust: user` used to succeed under the shipped default policy).
+What's left is coarser mislabeling -- recording genuinely tool-sourced content *as* `kind:
+utterance` itself, which no per-event check can distinguish from the real thing. That is why
+events still carry a `channel`, why hooks that observe the real user prompt are meant to run
+outside the model, and why the policy can additionally cap what the `mcp:*` channels may assert.
 
 ### 2.3 Compile
 `memories = compile(ledger)`. A pure, order-dependent fold over events: `derive` inserts a memory
@@ -135,12 +141,14 @@ pay for a model load.
 4. **Week 4 (done, pilot scale):** Python eval harness (`evals/`), driving the real binary as a
    black box via its `--json` CLI output, LLM steps via headless `claude -p` (no separate API key
    needed or configured). H1 staleness: checks drive stale-served-as-fresh from 100% (no-check
-   baseline) to 0%, no false positives (n=10/arm). H2 injection: found and fixed a real gap in the
-   *shipped default* policy (an empty `[policy.channels]` lets `observe --trust user` spoof its
-   way into an instruction; capping the channel at Tool trust "fixes" it by breaking the system's
-   own primary workflow too, capping at Agent instead closes it for free, confirmed by a positive
-   control) -- 1/7 attacks succeed under default, 0/7 once hardened, legitimate preference
-   creation unaffected either way. H3 parity: one real LoCoMo conversation piloted end to end
+   baseline) to 0%, no false positives (n=10/arm). H2 injection: found and fixed a real gap --
+   `observe` accepted a trust override uncorrelated with `kind`, so a fresh vault's empty
+   `[policy.channels]` let `observe --trust user` on tool-output content spoof its way into an
+   instruction (1/7 attacks). Fixed at the root in `Vault::observe`, not by config: a trust
+   override may only downgrade from `kind.default_trust()`, never raise above it -- closes the
+   gap under the *unmodified default* (0/7), confirmed by a positive control that legitimate
+   evidence-backed preference creation is unaffected; channel-capping at Agent (Tool breaks
+   `remember()` outright, checked before this landed) remains as defense-in-depth. H3 parity: one real LoCoMo conversation piloted end to end
    (118 facts extracted, 4/8 questions answered correctly using only `recall`'s output, judged by
    Claude); LongMemEval's loader is built and its download verified live but not run at pilot
    scale this session (~277MB, far more `claude -p` volume per instance). H4 reproducibility:

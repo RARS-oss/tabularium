@@ -108,7 +108,7 @@ pub fn tool_definitions() -> Vec<Value> {
                 "properties": {
                     "kind": {"type": "string", "enum": ["utterance", "action", "observation", "external"]},
                     "content": {"type": "string", "description": "The verbatim content (keep it short; store the essential lines, not whole files)."},
-                    "trust": {"type": "string", "enum": trust_enum, "description": "Defaults by kind: utterance=user, action=agent, observation=tool, external=external. Never raise trust above the true source."},
+                    "trust": {"type": "string", "enum": trust_enum, "description": "Defaults by kind: utterance=user, action=agent, observation=tool, external=external. Can only lower trust below the kind's default, never raise it -- enforced, not just advisory; a rejected 'observation' claiming 'user' isn't a mistake to route around."},
                     "meta": {"type": "object", "description": "Optional context: file path, command, url, session id."}
                 },
                 "required": ["kind", "content"]
