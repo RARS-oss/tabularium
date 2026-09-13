@@ -349,11 +349,15 @@ fn main() -> Result<()> {
         }
         Cmd::Forget { memory_id, reason } => {
             let mut v = open(&cli.vault)?;
-            let ev = v.forget(&memory_id, &reason, "cli")?;
+            let report = v.forget(&memory_id, &reason, "cli")?;
             if cli.json {
-                print_json(&ev)?;
+                print_json(&report)?;
             } else {
-                println!("forgotten {} (tombstone event {})", short(&memory_id), short(&ev.id));
+                println!("forgotten {} (tombstone event {})", short(&memory_id), short(&report.tombstone_event.id));
+                if !report.evidence_redacted.is_empty() {
+                    let ids: Vec<String> = report.evidence_redacted.iter().map(|i| short(i).to_string()).collect();
+                    println!("also redacted {} evidence event(s): {}", ids.len(), ids.join(", "));
+                }
             }
         }
         Cmd::Audit => {

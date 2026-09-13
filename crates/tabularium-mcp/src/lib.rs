@@ -189,7 +189,7 @@ pub fn tool_definitions() -> Vec<Value> {
         }),
         json!({
             "name": "memory_forget",
-            "description": "Forget a memory: appends a tombstone, redacts the stored content, keeps the chain intact.",
+            "description": "Forget a memory: appends a tombstone, redacts the stored content, and redacts any evidence event no longer cited by another active memory. Keeps the chain intact.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -483,8 +483,8 @@ impl McpServer {
             }
             "memory_forget" => {
                 let id = require_str(args, "memory_id")?;
-                let ev = self.vault.forget(id, arg_str(args, "reason").unwrap_or(""), &self.channel.clone())?;
-                Ok(json!({"forgotten": id, "tombstone_event": ev.id}))
+                let report = self.vault.forget(id, arg_str(args, "reason").unwrap_or(""), &self.channel.clone())?;
+                Ok(json!({"forgotten": id, "tombstone_event": report.tombstone_event.id, "evidence_redacted": report.evidence_redacted}))
             }
             "memory_list" => {
                 let include_inactive = arg_bool(args, "include_inactive", false);

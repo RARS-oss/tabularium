@@ -200,6 +200,32 @@ fn contradictions_finds_drifted_subjects_and_signs_a_receipt() {
 }
 
 #[test]
+fn forget_redacts_evidence_orphaned_by_it_but_not_evidence_still_cited() {
+    let (_d, mut v) = new_vault();
+    let shared_ev = observe(&mut v, EventKind::Utterance, "shared evidence, cited twice");
+    let solo_ev = observe(&mut v, EventKind::Utterance, "solo evidence, cited once");
+
+    let a = v.remember(remember_in(MemoryKind::Fact, "fact A", vec![shared_ev.id.clone(), solo_ev.id.clone()])).unwrap();
+    let b = v.remember(remember_in(MemoryKind::Fact, "fact B", vec![shared_ev.id.clone()])).unwrap();
+
+    let report = v.forget(&a.id, "cleanup", "test").unwrap();
+    assert_eq!(report.evidence_redacted, vec![solo_ev.id.clone()], "only the evidence with no other citer is redacted");
+
+    assert!(v.get_event(&solo_ev.id).unwrap().unwrap().payload.is_none(), "orphaned evidence payload must be gone");
+    assert!(v.get_event(&shared_ev.id).unwrap().unwrap().payload.is_some(), "evidence still cited by an active memory must survive");
+
+    // b is untouched and still resolvable.
+    let b_now = v.get_memory(&b.id).unwrap().unwrap();
+    assert!(!b_now.tombstoned);
+
+    let a_after_audit = v.audit().unwrap();
+    assert!(a_after_audit.ok, "{:?}", a_after_audit.problems);
+    let before = v.snapshot().unwrap();
+    v.compile(true).unwrap();
+    assert_eq!(before, v.snapshot().unwrap());
+}
+
+#[test]
 fn forget_undoes_supersession_consistently() {
     // i (subject s) -> j supersedes i -> l supersedes j -> forget j: i must now point at l,
     // exactly as a rebuild (where j's derive is redacted and never had a subject) would compute.

@@ -105,8 +105,10 @@ pay for a model load.
    runtime needed — and the first root becomes the vault's root for resolving relative check paths);
    a status for memories that carry no checks ("unchecked", see §2.4) distinct from checks that
    could not run.
-3. **Week 3:** consolidation (dedup, merge) as explicit logged operations; shared vaults with
-   per-key trust; `redact` of source events.
+3. **Week 3 (in progress):** `redact` of source events (done — `forget` now also redacts any
+   evidence event that no other *active* memory still cites; an evidence event backing another
+   live memory survives, checked directly against the memories view rather than assumed);
+   consolidation (dedup, merge) as explicit logged operations; shared vaults with per-key trust.
 4. **Week 4:** Python eval harness, baselines, benchmarks for staleness and injection, paper skeleton.
 5. **Later:** GUI timeline ("what did the agent know at T"), HTTP transport, sampling-based
    extraction through the host.

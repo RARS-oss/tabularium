@@ -70,7 +70,8 @@ Set `TABULARIUM_NO_EMBED=1` to force lexical-only for a process; hooks always ru
 - `cargo test` runs unit, integration and property tests (proptest):
   - **trust monotonicity**: random operation sequences never yield a steering memory with non-user evidence;
   - **determinism**: incremental view == rebuilt view, vectors included; a copied vault recalls identically;
-  - **redaction**: forgetting a memory redacts its text and its vector, and the chain still audits;
+  - **redaction**: forgetting a memory redacts its text, its vector, and any evidence event no
+    longer cited by another active memory, and the chain still audits;
   - **integrity**: any altered byte in the ledger fails `audit`; the SQLite triggers make the table append-only;
   - **budget**: recall never exceeds its token budget.
 

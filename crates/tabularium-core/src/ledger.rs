@@ -42,6 +42,15 @@ pub struct EmbedReport {
     pub active: usize,
 }
 
+/// Result of forgetting a memory.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ForgetReport {
+    pub tombstone_event: Event,
+    /// Ids of evidence events whose payload was also redacted, because no other active memory
+    /// still cites them. An evidence event still backing another live memory is left untouched.
+    pub evidence_redacted: Vec<String>,
+}
+
 /// Ingestion channel used for embed events written by the engine itself.
 pub const EMBED_CHANNEL: &str = "embedder";
 
@@ -260,8 +269,9 @@ impl Vault {
         Ok(EmbedReport { model: Some(model), embedded, covered, active })
     }
 
-    /// Tombstone a memory: append a forget event, redact the derive payload, recompile.
-    pub fn forget(&mut self, memory_id: &str, reason: &str, channel: &str) -> Result<Event> {
+    /// Tombstone a memory: append a forget event, redact the derive payload, redact any evidence
+    /// event no longer cited by another active memory, recompile.
+    pub fn forget(&mut self, memory_id: &str, reason: &str, channel: &str) -> Result<ForgetReport> {
         let mem = self
             .get_memory(memory_id)?
             .ok_or_else(|| Error::NotFound(format!("memory '{memory_id}' does not exist")))?;
@@ -279,8 +289,31 @@ impl Vault {
              WHERE kind = 'embed' AND payload IS NOT NULL AND json_extract(payload, '$.memory_id') = ?1",
             [memory_id],
         )?;
+        let evidence_redacted = self.redact_orphaned_evidence(&mem.evidence, memory_id)?;
         self.compile(false)?;
-        Ok(ev)
+        Ok(ForgetReport { tombstone_event: ev, evidence_redacted })
+    }
+
+    /// Redact the payload of each evidence event in `candidates` that no other *active* memory
+    /// (besides `forgetting`, whose own view row is still active at this point) still cites. The
+    /// memories view is read as-is: not yet updated for this forget, since `compile` hasn't run.
+    fn redact_orphaned_evidence(&mut self, candidates: &[String], forgetting: &str) -> Result<Vec<String>> {
+        if candidates.is_empty() {
+            return Ok(Vec::new());
+        }
+        let active = self.memories(false)?;
+        let mut redacted = Vec::new();
+        for id in candidates {
+            let still_cited = active.iter().any(|m| m.id != forgetting && m.evidence.iter().any(|e| e == id));
+            if still_cited {
+                continue;
+            }
+            let n = self.conn.execute("UPDATE events SET payload = NULL WHERE id = ?1 AND payload IS NOT NULL", [id])?;
+            if n > 0 {
+                redacted.push(id.clone());
+            }
+        }
+        Ok(redacted)
     }
 
     pub fn get_event(&self, id: &str) -> Result<Option<Event>> {
