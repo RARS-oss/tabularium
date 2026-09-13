@@ -33,13 +33,13 @@ Add to `.mcp.json` in your project (or `~/.claude.json` for all projects):
 ```
 
 Optional but recommended, in `.claude/settings.json`: a hook that whispers "you have memories about this"
-on every prompt, and one that records file edits as evidence automatically.
+on every prompt, and one that records file reads and edits as evidence automatically.
 
 ```json
 {
   "hooks": {
     "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "tabularium hook user-prompt" }] }],
-    "PostToolUse": [{ "matcher": "Edit|Write|MultiEdit", "hooks": [{ "type": "command", "command": "tabularium hook post-tool" }] }]
+    "PostToolUse": [{ "matcher": "Read|Edit|Write|MultiEdit", "hooks": [{ "type": "command", "command": "tabularium hook post-tool" }] }]
   }
 }
 ```

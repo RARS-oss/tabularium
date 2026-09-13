@@ -564,25 +564,90 @@ fn run_hook(vault_dir: &Option<PathBuf>, event: &str) -> Result<()> {
                 );
             }
         }
-        "post-tool" => {
-            let tool = input.get("tool_name").and_then(|t| t.as_str()).unwrap_or("tool");
-            let Some(path) = input.pointer("/tool_input/file_path").and_then(|p| p.as_str()) else {
-                return Ok(());
-            };
-            let hash = std::fs::read(path).ok().map(|b| tabularium_core::canon::blake3_hex(&b));
-            let content = match &hash {
-                Some(h) => format!("{tool} touched {path} (blake3 {})", &h[..12]),
-                None => format!("{tool} touched {path}"),
-            };
-            v.observe(ObserveInput {
-                kind: EventKind::Observation,
-                content,
-                trust: Some(Trust::Tool),
-                channel: "hook:PostToolUse".into(),
-                meta: Some(serde_json::json!({"tool_name": tool, "file_path": path, "blake3": hash})),
-            })?;
-        }
+        "post-tool" => handle_post_tool(&mut v, &input)?,
         other => return Err(anyhow!("unknown hook event '{other}' (expected user-prompt | post-tool)")),
     }
     Ok(())
+}
+
+/// Present tense a reader expects for the tool that touched the file. Read matters here as much as
+/// Edit/Write/MultiEdit: what the agent *read* is exactly the ground truth a later `remember` should
+/// cite as evidence, and a hook (not the agent's self-report) is the only way to record that it's real.
+fn touch_verb(tool: &str) -> &'static str {
+    match tool {
+        "Read" => "read",
+        "Write" => "wrote",
+        "Edit" | "MultiEdit" | "NotebookEdit" => "edited",
+        _ => "touched",
+    }
+}
+
+/// Record a `PostToolUse` file touch as a tool-trust observation, evidence for a later `remember`.
+/// Never fails the hook: a file it can't read (deleted mid-tool-call, race, permissions) just means
+/// no hash is recorded, not a hard error.
+fn handle_post_tool(v: &mut Vault, input: &serde_json::Value) -> Result<()> {
+    let tool = input.get("tool_name").and_then(|t| t.as_str()).unwrap_or("tool");
+    let Some(path) = input.pointer("/tool_input/file_path").and_then(|p| p.as_str()) else {
+        return Ok(());
+    };
+    let hash = std::fs::read(path).ok().map(|b| tabularium_core::canon::blake3_hex(&b));
+    let verb = touch_verb(tool);
+    let content = match &hash {
+        Some(h) => format!("{tool} {verb} {path} (blake3 {})", &h[..12]),
+        None => format!("{tool} {verb} {path}"),
+    };
+    v.observe(ObserveInput {
+        kind: EventKind::Observation,
+        content,
+        trust: Some(Trust::Tool),
+        channel: "hook:PostToolUse".into(),
+        meta: Some(serde_json::json!({"tool_name": tool, "file_path": path, "blake3": hash})),
+    })?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn touch_verb_distinguishes_read_from_write() {
+        assert_eq!(touch_verb("Read"), "read");
+        assert_eq!(touch_verb("Write"), "wrote");
+        assert_eq!(touch_verb("Edit"), "edited");
+        assert_eq!(touch_verb("MultiEdit"), "edited");
+        assert_eq!(touch_verb("NotebookEdit"), "edited");
+        assert_eq!(touch_verb("Bash"), "touched");
+    }
+
+    #[test]
+    fn post_tool_records_a_read_as_tool_trust_observation() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("proj");
+        std::fs::create_dir_all(&root).unwrap();
+        let f = root.join("notes.md");
+        std::fs::write(&f, "hello").unwrap();
+        let mut v = Vault::init(&dir.path().join("vault"), "t", Some(&root)).unwrap();
+
+        let input = serde_json::json!({"tool_name": "Read", "tool_input": {"file_path": f.to_string_lossy()}});
+        handle_post_tool(&mut v, &input).unwrap();
+
+        let (_seq, _hash) = v.head().unwrap();
+        let events = v.events(0, 10).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].trust, Trust::Tool);
+        assert_eq!(events[0].channel, "hook:PostToolUse");
+        let payload = events[0].payload.as_ref().unwrap();
+        assert!(payload["content"].as_str().unwrap().contains("Read read"), "{payload}");
+        assert!(payload["content"].as_str().unwrap().contains("blake3"), "{payload}");
+    }
+
+    #[test]
+    fn post_tool_ignores_non_file_tools() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut v = Vault::init(&dir.path().join("vault"), "t", Some(dir.path())).unwrap();
+        let input = serde_json::json!({"tool_name": "Bash", "tool_input": {"command": "ls"}});
+        handle_post_tool(&mut v, &input).unwrap();
+        assert_eq!(v.events(0, 10).unwrap().len(), 0);
+    }
 }

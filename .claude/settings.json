@@ -9,7 +9,7 @@
     ],
     "PostToolUse": [
       {
-        "matcher": "Edit|Write|MultiEdit",
+        "matcher": "Read|Edit|Write|MultiEdit",
         "hooks": [
           { "type": "command", "command": "tabularium hook post-tool", "timeout": 10 }
         ]

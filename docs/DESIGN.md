@@ -93,8 +93,10 @@ pay for a model load.
    `Vault::contradictions` pairs active memories with *different* subjects whose stored embeddings
    exceed a separate, stricter threshold than recall's, since supersession already resolves same-subject
    drift; no LLM judges the pair, so it's reported as a possible conflict, not a proven one); hooks that
-   record file reads as evidence; `roots` support in MCP; a status for memories that carry no checks
-   ("unchecked") distinct from checks that could not run.
+   record file reads as evidence (done — the existing `PostToolUse` hook already keyed off
+   `tool_input.file_path`, generic across tools; the gap was the shipped matcher excluding `Read`,
+   now `Read|Edit|Write|MultiEdit`); `roots` support in MCP; a status for memories that carry no
+   checks ("unchecked") distinct from checks that could not run.
 3. **Week 3:** consolidation (dedup, merge) as explicit logged operations; shared vaults with
    per-key trust; `redact` of source events.
 4. **Week 4:** Python eval harness, baselines, benchmarks for staleness and injection, paper skeleton.
