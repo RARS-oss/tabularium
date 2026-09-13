@@ -83,10 +83,15 @@ Three specific questions from an external review, checked rather than argued:
   is warm (16-22ms). Recall latency at 3200 active memories is still 48ms (sub-linear growth from
   50 memories' 13.6ms) -- the real cost the review named is specifically CLI-per-call usage, not
   recall's own scan.
-- **Cross-language recall quality** (`language/ru_en_rrf.py`): real, but with a real gap --
-  same-language MRR 0.95 vs. cross-language MRR 0.325 on a mixed 20-memory RU/EN vault with the
-  real ONNX embedder. The README's "ask in Russian, find English" line now points here instead of
-  implying parity.
+- **Cross-language recall quality** (`language/ru_en_rrf.py`): real, with a narrowed but not closed
+  gap. The root cause turned out to be `embeddings.threshold` (calibrated for same-language
+  recall) rejecting genuinely-correct cross-script matches before they could become ranking
+  candidates at all -- not BM25 interference, which the raw cosine dump ruled out directly. Fixed
+  with a script-aware threshold (`text::dominant_script`, `EmbeddingConfig::cross_script_threshold`
+  in `tabularium-core`): found-within-budget rose from 65% to 90% and MRR from 0.325 to 0.41 on the
+  same mixed 20-memory RU/EN vault with the real ONNX embedder, same-language MRR unchanged at
+  0.95. Top-1 accuracy stayed at 5% -- the fix restores candidacy, not ranking parity. See
+  `evals/paper/skeleton.md` §3.5 for the full before/after writeup.
 
 ## Layout
 

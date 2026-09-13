@@ -155,5 +155,23 @@ pay for a model load.
    100% identical recalls across repeats, a copied vault, and a rebuild (n=3), independently of
    the Rust-internal property test asserting the same thing. Paper skeleton at
    `evals/paper/skeleton.md` with these real numbers, explicit about pilot scope throughout.
-5. **Later:** GUI timeline ("what did the agent know at T"), HTTP transport, sampling-based
+5. **Post-launch review follow-ups (done):** an external review of the published project raised
+   two things to check empirically rather than argue: `verify()` false positives during mass
+   refactoring (checked -- `symbol_in_file` catches 0% of purely-cosmetic reformats while still
+   catching 100% of genuine renames; prefer it over `file_hash` unless the claim really is about
+   exact bytes) and RRF degradation on mixed RU/EN content (real gap found: §3.5's cross-language
+   MRR 0.325 vs. 0.95 same-language). Root cause for the latter, found by dumping raw pre-threshold
+   cosines: not BM25 (stopwords are filtered in both languages, so a cross-script pair shares zero
+   lexical tokens by construction and RRF already falls back to the semantic rank alone), but
+   `embeddings.threshold` itself -- calibrated for same-language recall, it was rejecting
+   genuinely-correct cross-script matches (cosine 0.077-0.29) before they could even become
+   candidates, in 7 of 20 direction/topic pairs. Fixed with a script-aware threshold: a local,
+   deterministic classifier (`text::dominant_script`, majority-Cyrillic vs. majority-Latin,
+   `Other` for short/ambiguous text) picks a lower threshold (`cross_script_threshold`, calibrated
+   to 0.20) only for a query/candidate pair whose scripts differ -- no translation, no network
+   call, same-language recall untouched. Found-within-budget rose 65% -> 90%, MRR 0.325 -> 0.41;
+   top-1 accuracy stayed at 5%, since the fix restores candidacy, not ranking parity, and two
+   genuinely mismatched pairs (near-zero or negative cosine) remain unfound by design rather than
+   flooding every other query with noise to chase them. See `evals/paper/skeleton.md` §3.5.
+6. **Later:** GUI timeline ("what did the agent know at T"), HTTP transport, sampling-based
    extraction through the host.

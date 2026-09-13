@@ -720,6 +720,57 @@ fn remember_writes_embed_event_and_recall_fuses_semantics() {
     assert_eq!(v.hint("blake3", 3).unwrap().matched, 1);
 }
 
+/// Returns a fixed, already-normalized 2D vector for every text except `query_text`, which maps
+/// to `[1.0, 0.0]` -- lets a test pin an exact cosine (here 0.22) between a query and a memory
+/// without depending on any real semantic model, isolating the script-based threshold logic from
+/// embedding quality.
+struct FixedVectorEmbedder {
+    query_text: String,
+}
+
+impl Embedder for FixedVectorEmbedder {
+    fn model_id(&self) -> &str {
+        "fixed:2"
+    }
+    fn dim(&self) -> usize {
+        2
+    }
+    fn embed(&mut self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+        Ok(texts
+            .iter()
+            .map(|t| if *t == self.query_text { vec![1.0_f32, 0.0] } else { vec![0.22_f32, (1.0f32 - 0.22f32 * 0.22).sqrt()] })
+            .collect())
+    }
+}
+
+#[test]
+fn cross_script_pairs_use_the_lower_semantic_threshold() {
+    // Query and memory text are gibberish tokens chosen to share zero BM25 overlap, so only the
+    // semantic threshold decides candidacy -- found via evals/language/ru_en_rrf.py: cross-script
+    // matches at cosine ~0.20-0.29 were being dropped before threshold 0.30 (see embed.rs's
+    // `default_cross_script_threshold` doc comment for the real numbers).
+    let query = "zzzqueryalpha yyyqueryomega".to_string();
+    let (_d, mut v) = new_vault();
+    v.set_embedder(Some(Box::new(FixedVectorEmbedder { query_text: query.clone() })));
+
+    let cyrillic = v.remember(remember_in(MemoryKind::Fact, "ффыва олдж бюжюж", vec![])).unwrap();
+    let latin = v.remember(remember_in(MemoryKind::Fact, "zzznoisebeta wwwnoisegamma qqqnoisedelta", vec![])).unwrap();
+
+    let r = v.recall(&query, &RecallOptions::default()).unwrap();
+    let ids: Vec<&str> = r.items.iter().map(|it| it.id.as_str()).collect();
+    assert!(
+        ids.contains(&cyrillic.id.as_str()),
+        "a cross-script match at cosine 0.22 (above cross_script_threshold 0.20) should surface: {:?}",
+        r.items.iter().map(|i| (&i.id, i.cosine)).collect::<Vec<_>>()
+    );
+    assert!(
+        !ids.contains(&latin.id.as_str()),
+        "the same cosine 0.22 between two same-script (Latin) texts stays below the normal threshold 0.30"
+    );
+    let recorded = r.receipt.body["policy"]["semantic"]["cross_script_threshold"].as_f64().unwrap();
+    assert!((recorded - 0.20).abs() < 1e-6, "receipt should record the threshold actually applied: {recorded}");
+}
+
 #[test]
 fn embeddings_survive_rebuild_and_are_redacted_on_forget() {
     let (_d, mut v) = new_vault_with_hash_embedder();

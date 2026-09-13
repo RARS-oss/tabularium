@@ -7,7 +7,7 @@
 use crate::canon::{blake3_hex, canonical_json, RECEIPT_DOMAIN};
 use crate::embed::{cosine, quantize};
 use crate::error::Result;
-use crate::text::{estimate_tokens, tokenize, Bm25, Doc, BM25_B, BM25_K1};
+use crate::text::{dominant_script, estimate_tokens, tokenize, Bm25, Doc, BM25_B, BM25_K1};
 use crate::types::*;
 use crate::vault::{now_rfc3339, Vault};
 use crate::verify::run_checks;
@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashMap;
 
-pub const POLICY_VERSION: u32 = 2;
+pub const POLICY_VERSION: u32 = 3;
 /// Tokens charged per item on top of its text, for the kind/status framing the host adds.
 pub const ITEM_OVERHEAD_TOKENS: u32 = 8;
 /// Upper bound on how many candidates get verified per recall, to bound recall latency.
@@ -196,12 +196,20 @@ impl Vault {
         }
         let index_of: HashMap<&str, usize> = memories.iter().enumerate().map(|(i, m)| (m.id.as_str(), i)).collect();
         let threshold = self.config.embeddings.threshold;
+        // Never lets a misconfigured cross_script_threshold raise the bar above the normal one.
+        let cross_script_threshold = self.config.embeddings.cross_script_threshold.min(threshold);
+        let query_script = dominant_script(query);
         let mut ranking: Vec<(usize, f32)> = stored
             .iter()
             .filter_map(|(id, v)| {
                 let i = *index_of.get(id.as_str())?;
                 let c = quantize(cosine(&qvec, v));
-                (c >= threshold).then_some((i, c))
+                let effective_threshold = if query_script.crosses(dominant_script(&memories[i].text)) {
+                    cross_script_threshold
+                } else {
+                    threshold
+                };
+                (c >= effective_threshold).then_some((i, c))
             })
             .collect();
         ranking.sort_by(|a, b| {
@@ -366,8 +374,9 @@ impl Vault {
         let result_hash = blake3_hex(canonical_json(&serde_json::Value::Array(receipt_items.clone())).as_bytes());
         let ts = now_rfc3339();
         let semantic_policy = sem.as_ref().map(|s| {
-            json!({"model": s.model, "threshold": self.config.embeddings.threshold, "fusion": "rrf", "k": RRF_K,
-                   "query_vector_hash": s.query_hash})
+            json!({"model": s.model, "threshold": self.config.embeddings.threshold,
+                   "cross_script_threshold": self.config.embeddings.cross_script_threshold.min(self.config.embeddings.threshold),
+                   "fusion": "rrf", "k": RRF_K, "query_vector_hash": s.query_hash})
         });
         let body = json!({
             "kind": "recall",

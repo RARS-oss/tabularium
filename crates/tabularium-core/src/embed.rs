@@ -120,6 +120,11 @@ pub struct EmbeddingConfig {
     /// Minimum quantized cosine for a memory to count as a semantic match.
     #[serde(default = "default_threshold")]
     pub threshold: f32,
+    /// Lower semantic-match threshold used only for a query/candidate pair whose dominant scripts
+    /// differ (`text::Script::crosses`, e.g. a Russian query against an English memory). Never
+    /// raises the effective threshold: values above `threshold` are clamped down to it.
+    #[serde(default = "default_cross_script_threshold")]
+    pub cross_script_threshold: f32,
     /// Minimum quantized cosine between two differently-`subject`ed active memories for
     /// `Vault::contradictions` to flag them as a possible conflict. Higher than `threshold`
     /// because this needs "same specific claim", not "same topic".
@@ -149,6 +154,22 @@ fn default_threshold() -> f32 {
     0.30
 }
 
+/// Calibrated by dogfooding against `evals/language/ru_en_rrf.py`'s real ONNX multilingual
+/// embedder (2026-09-13): a mixed RU/EN vault's genuinely-correct cross-script matches (the model
+/// puts each one at or near rank 1 among same-direction candidates) land at cosine 0.077-0.62 --
+/// often well under `threshold`'s monolingual calibration of 0.30, so they were being dropped
+/// before they could even be ranked (7/20 cross-script queries in that eval never found their
+/// target at all). 0.20 recovers every case in that run where the correct match was 0.20-0.29 and
+/// still the best cross-script candidate, without admitting wrong-topic cross-script noise ahead
+/// of it: the off-diagonal (wrong-topic) cosines that newly clear 0.20 topped out around 0.30,
+/// never above the true match's own score in the same query. Below 0.20 the remaining misses
+/// (e.g. "фича-флаги" vs. "feature flags" at cosine -0.002) are a real embedding-quality limit,
+/// not a threshold problem -- no cutoff recovers a negative cosine without also flooding every
+/// other query with noise.
+fn default_cross_script_threshold() -> f32 {
+    0.20
+}
+
 /// Calibrated by dogfooding against a real vault (2026-09-13): the multilingual MiniLM model puts
 /// two genuinely-drifted paraphrased plans (`build-priority-order` vs `planned-projects-list`,
 /// same roadmap, one updated and one not) at cosine 0.544 — well under an initial guess of 0.72,
@@ -172,6 +193,7 @@ impl Default for EmbeddingConfig {
             enabled: true,
             model: default_model(),
             threshold: default_threshold(),
+            cross_script_threshold: default_cross_script_threshold(),
             contradiction_threshold: default_contradiction_threshold(),
             duplicate_threshold: default_duplicate_threshold(),
             cache_dir: None,

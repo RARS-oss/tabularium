@@ -44,6 +44,55 @@ pub fn is_stopword(token: &str) -> bool {
     STOPWORD_SET.contains(token)
 }
 
+/// Coarse writing-script signal, used only by `Vault::recall` to decide which semantic-match
+/// threshold applies to a query/candidate pair. Never used for tokenization, translation, or
+/// anything that changes what a memory means -- purely a local, deterministic heuristic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Script {
+    Cyrillic,
+    Latin,
+    /// No reliable script signal: too short, digits/punctuation only, or genuinely mixed. Treated
+    /// as "don't lower the threshold" since guessing would be unreliable either way.
+    Other,
+}
+
+impl Script {
+    /// True only when both sides have a clear, *different* dominant script -- the one case where
+    /// BM25 structurally cannot help (no shared alphabet) and a lower semantic threshold is
+    /// justified. `Other` never crosses anything.
+    pub fn crosses(self, other: Script) -> bool {
+        self != Script::Other && other != Script::Other && self != other
+    }
+}
+
+/// Classifies by counting Cyrillic vs. Latin letters and requiring a clear majority (>= 70%) of
+/// whichever total reaches at least 4 letters. The margin and minimum guard against
+/// misclassifying short strings, numbers, or text that genuinely mixes scripts (a Russian
+/// sentence with "VPN" or "PostgreSQL" in it stays `Cyrillic`, not `Other`, since the Cyrillic
+/// share still clears 70%).
+pub fn dominant_script(text: &str) -> Script {
+    let mut cyrillic: u32 = 0;
+    let mut latin: u32 = 0;
+    for ch in text.chars() {
+        if ('\u{0400}'..='\u{04FF}').contains(&ch) {
+            cyrillic += 1;
+        } else if ch.is_ascii_alphabetic() {
+            latin += 1;
+        }
+    }
+    let total = cyrillic + latin;
+    if total < 4 {
+        return Script::Other;
+    }
+    if cyrillic as f64 >= 0.7 * total as f64 {
+        Script::Cyrillic
+    } else if latin as f64 >= 0.7 * total as f64 {
+        Script::Latin
+    } else {
+        Script::Other
+    }
+}
+
 /// Lowercase alphanumeric runs (Unicode-aware), minus stopwords. Tokens shorter than two chars
 /// are dropped unless they are digits.
 pub fn tokenize(text: &str) -> Vec<String> {
@@ -197,6 +246,28 @@ mod tests {
         assert_eq!(tokenize("давай допилим MCP сервер, бро"), vec!["допилим", "mcp", "сервер"]);
         assert!(tokenize("the of and в на").is_empty());
         assert_eq!(tokenize("port 8080"), vec!["port", "8080"]);
+    }
+
+    #[test]
+    fn dominant_script_classifies_clear_and_ambiguous_cases() {
+        assert_eq!(dominant_script("which branch do we deploy from"), Script::Latin);
+        assert_eq!(dominant_script("с какой ветки мы деплоим"), Script::Cyrillic);
+        // A Russian sentence with an embedded Latin technical term stays Cyrillic: the Cyrillic
+        // share still clears the 70% majority.
+        assert_eq!(dominant_script("Секреты хранятся в облачном key vault"), Script::Cyrillic);
+        assert_eq!(dominant_script("ok"), Script::Other, "below the 4-letter minimum");
+        assert_eq!(dominant_script("12345"), Script::Other, "digits carry no script signal");
+        assert_eq!(dominant_script("hello привет"), Script::Other, "genuinely mixed, no majority");
+    }
+
+    #[test]
+    fn script_crosses_only_between_two_concrete_different_scripts() {
+        assert!(Script::Cyrillic.crosses(Script::Latin));
+        assert!(Script::Latin.crosses(Script::Cyrillic));
+        assert!(!Script::Latin.crosses(Script::Latin));
+        assert!(!Script::Cyrillic.crosses(Script::Other));
+        assert!(!Script::Other.crosses(Script::Latin));
+        assert!(!Script::Other.crosses(Script::Other));
     }
 
     #[test]

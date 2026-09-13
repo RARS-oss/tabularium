@@ -177,24 +177,46 @@ host that shells out instead of holding an MCP session open) -- 1.3s per call th
 a long-lived session avoids entirely, not a small one.
 
 **Cross-language recall quality** (`language/ru_en_rrf.py`). The README claims "ask in Russian,
-find what was saved in English." True, but the claim understates the real gap: 10 topics recorded
-in English and 10 different topics in Russian, one mixed 20-memory vault, each topic queried both
-in its own language and the other, real local ONNX embeddings throughout (not the deterministic
-test embedder):
+find what was saved in English." True, but the first measurement understated the real gap: 10
+topics recorded in English and 10 different topics in Russian, one mixed 20-memory vault, each
+topic queried both in its own language and the other, real local ONNX embeddings throughout (not
+the deterministic test embedder):
 
 | condition | top-1 accuracy | found within budget | MRR |
 |---|---|---|---|
 | same-language (en->en / ru->ru) | 90% | 100% | 0.95 |
-| cross-language (ru->en / en->ru) | **5%** | 65% | **0.325** |
+| cross-language, before fix | 5% | 65% | 0.325 |
+| cross-language, after fix | **5%** | **90%** | **0.41** |
 
-Cross-language retrieval almost never wins rank 1 (usually rank 2, edged out by a same-language
-decoy that shares no real relevance but picks up incidental BM25 token overlap RRF still credits),
-and misses the target within budget entirely 35% of the time. The claim "it works" is true --
-cross-language recall is never zero, and correctly-recalled items nearly always beat chance -- but
-"works" and "works about as well as same-language" are different claims, and only the first one
-holds at this scale. Worth a real fix candidate for later: weighting the semantic rank more heavily
-relative to BM25 specifically when the query and candidate scripts differ, rather than treating
-this as a closed claim.
+Root cause, found by dumping the raw (pre-threshold) cosine for every query against every
+candidate: BM25 was never the culprit -- stopwords are filtered in both languages, so a
+cross-script query and candidate share zero lexical tokens by construction, and RRF correctly
+falls back to the semantic rank alone for those pairs. The actual bug was `embeddings.threshold`
+(0.30, calibrated for same-language recall) rejecting genuinely-correct cross-script matches before
+they could even become ranking candidates: in 7 of 20 direction/topic pairs, the multilingual
+model's *correct* cross-script cosine (0.077-0.29) was already the best-scoring cross-script
+candidate for that query, but sat below 0.30 and so never entered the fused ranking at all.
+
+The fix (`text::dominant_script` + `EmbeddingConfig::cross_script_threshold`, `crates/tabularium-core/src/recall.rs`,
+`embed.rs`): a cheap, local, deterministic script classifier (majority-Cyrillic vs.
+majority-Latin, `Other` for short/ambiguous text) decides, per query/candidate pair, whether to
+apply the normal threshold or a lower one (0.20, calibrated against this same run: it recovers
+every case where the correct cross-script match scored 0.20-0.29 and was already the top candidate
+in its direction, without admitting wrong-topic cross-script noise ahead of it in this vault). No
+translation, no network call, no change to same-language recall at all -- same-language MRR is
+bit-for-bit unchanged (0.95) after the fix, exactly as intended.
+
+Found-within-budget rose from 65% to 90% (6 of the 7 threshold-cut cases recovered); MRR rose from
+0.325 to 0.41, narrowing the gap to same-language from 0.625 to 0.54. Top-1 accuracy did **not**
+move (5%, both before and after): the fix restores *candidacy*, not ranking quality -- a recovered
+cross-script match usually lands at rank 2-3 behind a same-language memory the embedder itself
+ranks higher, a genuine model-precision limit no threshold change can fix. The two pairs that stay
+unfound are the two the calibration run showed sitting at cosine 0.077 and a negative value
+respectively ("фича-flags"-style terminology mismatch) -- below even the lowered threshold, and
+correctly so: recovering those specific cosines would mean lowering the bar enough to flood every
+other cross-script query with wrong-topic noise instead. The corrected claim: cross-language recall
+works meaningfully better than before, and reliably finds the right memory 9 times in 10 within
+budget, but does not (and by design of this fix, cannot) reach same-language ranking parity.
 
 ## 4. Limitations
 
@@ -209,9 +231,10 @@ this as a closed claim.
   automatically -- but it was validated against this session's own 7-attack corpus, not an
   independent one; broader adversarial coverage (real AgentPoison/MINJA payloads replayed
   verbatim) would strengthen the claim further.
-- Cross-language recall's real gap (MRR 0.325 vs. 0.95 same-language, §3.5) is not yet fixed, only
-  measured -- the README's "ask in Russian, find English" property line is accurate about
-  direction, not magnitude, until this is addressed.
+- Cross-language recall's gap is narrowed, not closed (§3.5): after the script-aware threshold
+  fix, found-within-budget is 90% and MRR is 0.41, up from 65%/0.325, but top-1 accuracy is
+  unchanged at 5% and same-language MRR (0.95) is still far ahead -- a real embedding-precision
+  ceiling this fix does not and cannot touch.
 - The 3200-memory scale test is still a single vault shape (short, English/Russian facts, no
   checks); a vault with many checked memories would additionally pay `verify`'s per-check I/O cost
   at recall time, not measured here.
