@@ -173,5 +173,22 @@ pay for a model load.
    top-1 accuracy stayed at 5%, since the fix restores candidacy, not ranking parity, and two
    genuinely mismatched pairs (near-zero or negative cosine) remain unfound by design rather than
    flooding every other query with noise to chase them. See `evals/paper/skeleton.md` §3.5.
-6. **Later:** GUI timeline ("what did the agent know at T"), HTTP transport, sampling-based
-   extraction through the host.
+6. **HTTP transport (done):** a second, optional transport (`tabularium serve --http`, the `http`
+   feature in `tabularium-mcp`, on by default) for networked multi-agent use, alongside stdio
+   rather than replacing it. Implements a scoped subset of MCP's "Streamable HTTP": one
+   `POST /mcp` endpoint carries JSON-RPC bodies, sessions are tracked by an `Mcp-Session-Id` header
+   minted at `initialize`, and a notification that produces a server-initiated message (only
+   `roots/list` today) rides back as a one-shot `text/event-stream` response to that same POST
+   rather than a standing GET stream -- nothing here generates messages outside direct request
+   handling, so `GET /mcp` answers 405 rather than pretending to support one. Each session opens
+   its own `Vault::open` (mirroring "one stdio process per client," just multiplexed within one
+   process); this is safe unmodified because `Vault::open` already sets WAL journal mode and a
+   busy timeout for exactly this kind of concurrent access. The real addition HTTP forces that
+   stdio never needed: a trust boundary. Whoever can start a local stdio process already has your
+   filesystem access; a network listener has no such freebie, so every request requires a bearer
+   token (constant-time compared, generated on first run and saved to `<vault>/http_token` unless
+   supplied), and the server binds to loopback by default -- binding wider prints a loud warning
+   instead of a silent success. There is deliberately no TLS: this targets local demos and networks
+   you already trust, not an internet-facing service; put a real reverse proxy in front for that.
+7. **Later:** GUI timeline ("what did the agent know at T"), sampling-based extraction through
+   the host.

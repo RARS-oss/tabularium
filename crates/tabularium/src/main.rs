@@ -132,7 +132,20 @@ enum Cmd {
     /// Vault status
     Info,
     /// Serve the Model Context Protocol over stdio (creates the vault if missing)
-    Serve,
+    Serve {
+        /// Serve over HTTP instead of stdio (for networked multi-agent use; see docs/DESIGN.md).
+        /// Binds to loopback by default, requires a bearer token on every request, and has no TLS
+        /// of its own -- put a reverse proxy in front if you bind beyond 127.0.0.1.
+        #[arg(long)]
+        http: bool,
+        /// Address to bind when --http is set (default 127.0.0.1:7433)
+        #[arg(long, default_value = "127.0.0.1:7433")]
+        bind: String,
+        /// Bearer token required on every HTTP request (default: $TABULARIUM_HTTP_TOKEN, or a
+        /// fresh random token printed once and saved to <vault>/http_token)
+        #[arg(long, env = "TABULARIUM_HTTP_TOKEN")]
+        token: Option<String>,
+    },
     /// Claude Code hook entry points; reads the hook JSON from stdin, never fails the hook
     Hook {
         /// user-prompt (UserPromptSubmit) | post-tool (PostToolUse)
@@ -641,29 +654,70 @@ fn main() -> Result<()> {
                 }
             }
         }
-        Cmd::Serve => {
+        Cmd::Serve { http, bind, token } => {
             let dir = Vault::resolve_dir(cli.vault.as_deref());
-            let mut vault = if Vault::exists(&dir) {
-                Vault::open(&dir).map_err(|e| anyhow!("{e}"))?
-            } else {
+            // Create the vault once, up front, regardless of transport -- an HTTP session's own
+            // Vault::open (one per session, see tabularium_mcp::http's module doc) assumes it
+            // already exists by the time the first request arrives.
+            if !Vault::exists(&dir) {
                 eprintln!("[tabularium] creating vault at {}", dir.display());
-                Vault::init(&dir, "default", None).map_err(|e| anyhow!("{e}"))?
-            };
-            load_writer_identity(&mut vault, cli.identity.as_deref())?;
-            if let Some(pk) = vault.writer_public_key_hex() {
-                eprintln!("[tabularium] writer identity {pk}");
+                Vault::init(&dir, "default", None).map_err(|e| anyhow!("{e}"))?;
             }
-            eprintln!("[tabularium] serving MCP over stdio; vault {}; root {}", vault.dir().display(), vault.root().display());
-            let mut server = McpServer::new(vault);
-            // Long-lived process: load the model once and backfill vectors before the first recall.
-            match server.vault_mut().embed_missing() {
-                Ok(r) => match r.model {
-                    Some(m) => eprintln!("[tabularium] embeddings via {m}: {} written, {}/{} covered", r.embedded, r.covered, r.active),
-                    None => eprintln!("[tabularium] embeddings unavailable; lexical recall only"),
-                },
-                Err(e) => eprintln!("[tabularium] embedding backfill failed: {e}"),
+
+            if http {
+                let bind: std::net::SocketAddr = bind.parse().map_err(|e| anyhow!("invalid --bind address '{bind}': {e}"))?;
+                let token = match token {
+                    Some(t) => t,
+                    None => {
+                        let token_path = dir.join("http_token");
+                        if token_path.exists() {
+                            std::fs::read_to_string(&token_path).context("reading saved http_token")?.trim().to_string()
+                        } else {
+                            let t = tabularium_mcp::http::generate_token().map_err(|e| anyhow!("{e}"))?;
+                            std::fs::write(&token_path, &t).context("saving http_token")?;
+                            #[cfg(unix)]
+                            {
+                                use std::os::unix::fs::PermissionsExt;
+                                let _ = std::fs::set_permissions(&token_path, std::fs::Permissions::from_mode(0o600));
+                            }
+                            eprintln!("[tabularium] generated bearer token, saved to {}", token_path.display());
+                            t
+                        }
+                    }
+                };
+                eprintln!("[tabularium] bearer token: {token}");
+                let identity_dir = cli.identity.clone();
+                let vault_dir = dir.clone();
+                let factory: tabularium_mcp::http::VaultFactory = Box::new(move || {
+                    let mut vault = Vault::open(&vault_dir).map_err(|e| e.to_string())?;
+                    if let Some(id_dir) = Vault::resolve_identity_dir(identity_dir.as_deref()) {
+                        let keys = tabularium_core::keys::VaultKeys::load(&id_dir)
+                            .map_err(|e| format!("loading identity at {}: {e}", id_dir.display()))?;
+                        vault.set_writer_identity(Some(keys));
+                    }
+                    Ok(vault)
+                });
+                let log = std::env::var("TABULARIUM_LOG").map(|v| v == "1").unwrap_or(false);
+                eprintln!("[tabularium] serving MCP over http; vault {}", dir.display());
+                tabularium_mcp::http::run_http(tabularium_mcp::http::HttpConfig { bind, token, log }, factory)?;
+            } else {
+                let mut vault = Vault::open(&dir).map_err(|e| anyhow!("{e}"))?;
+                load_writer_identity(&mut vault, cli.identity.as_deref())?;
+                if let Some(pk) = vault.writer_public_key_hex() {
+                    eprintln!("[tabularium] writer identity {pk}");
+                }
+                eprintln!("[tabularium] serving MCP over stdio; vault {}; root {}", vault.dir().display(), vault.root().display());
+                let mut server = McpServer::new(vault);
+                // Long-lived process: load the model once and backfill vectors before the first recall.
+                match server.vault_mut().embed_missing() {
+                    Ok(r) => match r.model {
+                        Some(m) => eprintln!("[tabularium] embeddings via {m}: {} written, {}/{} covered", r.embedded, r.covered, r.active),
+                        None => eprintln!("[tabularium] embeddings unavailable; lexical recall only"),
+                    },
+                    Err(e) => eprintln!("[tabularium] embedding backfill failed: {e}"),
+                }
+                server.run_stdio()?;
             }
-            server.run_stdio()?;
         }
         Cmd::Hook { event } => {
             // Hooks must never break the agent: swallow errors, exit 0, print nothing on failure.

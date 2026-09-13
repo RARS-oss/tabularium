@@ -69,6 +69,23 @@ tabularium embed               # write vectors for memories that have none (firs
 Embeddings are on by default (`[embeddings]` in `vault.toml`: `enabled`, `model`, `threshold`, `cache_dir`).
 Set `TABULARIUM_NO_EMBED=1` to force lexical-only for a process; hooks always run lexical-only.
 
+## Networked / multi-agent use (HTTP)
+
+stdio is the right transport for one client, one local process (Claude Code, Cursor, Codex). For
+multiple agents talking to the same vault over a network, `serve` can speak HTTP instead:
+
+```sh
+tabularium serve --http --bind 127.0.0.1:7433
+#   generated bearer token, saved to <vault>/http_token -- share it with clients out of band
+```
+
+A single `POST /mcp` carries JSON-RPC bodies (sessions tracked by an `Mcp-Session-Id` header minted
+at `initialize`, one `Vault::open` per session); `DELETE /mcp` closes one. Every request needs
+`Authorization: Bearer <token>`, and the server binds to loopback unless you explicitly point it
+elsewhere -- there is no TLS built in, so treat this as a local/trusted-network tool and put a real
+reverse proxy in front if you need to expose it further. See `docs/DESIGN.md` §"HTTP transport" for
+the full design and why each of those choices was made.
+
 ### Sharing a vault between writers
 
 ```sh
@@ -98,8 +115,8 @@ never requires touching the vault first. `tabularium audit` verifies every write
 
 ```
 crates/tabularium-core   ledger, keys, compile, verify, recall
-crates/tabularium-mcp    JSON-RPC/stdio MCP server, no async runtime
-crates/tabularium        CLI + `serve`
+crates/tabularium-mcp    JSON-RPC MCP server: stdio (no async runtime) + optional HTTP transport
+crates/tabularium        CLI + `serve` (stdio or --http)
 integrations/claude-code example .mcp.json and hooks
 docs/DESIGN.md           the design and the research claims
 evals/                   Python benchmark harness: H1-H4 against DESIGN.md's claims
@@ -108,8 +125,9 @@ evals/                   Python benchmark harness: H1-H4 against DESIGN.md's cla
 ## Status
 
 v0.2: core, stored embeddings and hybrid recall, contradiction and duplicate detection, explicit merge,
-evidence redaction, shared vaults with per-key trust, and a Python eval harness against DESIGN.md's
-H1-H4 claims (`evals/`, real pilot-scale numbers in `evals/paper/skeleton.md`). See `docs/DESIGN.md`
-for what's next: a GUI timeline, HTTP transport, and the portfolio projects this one unblocks.
+evidence redaction, shared vaults with per-key trust, a Python eval harness against DESIGN.md's
+H1-H4 claims (`evals/`, real pilot-scale numbers in `evals/paper/skeleton.md`), and an optional HTTP
+transport for networked multi-agent use. See `docs/DESIGN.md` for what's next: a GUI timeline and
+the portfolio projects this one unblocks.
 
 License: MIT OR Apache-2.0.

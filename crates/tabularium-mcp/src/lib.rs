@@ -1,11 +1,17 @@
-//! Minimal, dependency-free MCP server (JSON-RPC 2.0 over stdio) exposing the memory engine.
+//! Minimal MCP server (JSON-RPC 2.0) exposing the memory engine.
 //!
-//! Only the `tools` capability is implemented. The transport is newline-delimited JSON on
-//! stdin/stdout; everything diagnostic goes to stderr.
+//! Only the `tools` capability is implemented. The default transport is newline-delimited JSON on
+//! stdin/stdout ([`McpServer::run_stdio`]), dependency-free and with no async runtime; everything
+//! diagnostic goes to stderr. An optional HTTP transport (the `http` feature, on by default) is in
+//! [`http`], for networked multi-agent use -- both transports share the same [`McpServer`] and
+//! [`McpServer::handle_message`] dispatch, so a tool call behaves identically either way.
 
 use serde_json::{json, Value};
 use std::io::{BufRead, Write};
 use tabularium_core::*;
+
+#[cfg(feature = "http")]
+pub mod http;
 
 pub const SERVER_NAME: &str = "tabularium";
 pub const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -298,6 +304,8 @@ impl McpServer {
     }
 
     /// Handle one line of input. Returns a response line for requests, nothing for notifications.
+    /// Thin string-framing wrapper around [`Self::handle_message`] for the stdio transport; the
+    /// HTTP transport (`http` feature) calls `handle_message` directly on an already-parsed body.
     pub fn handle_line(&mut self, line: &str) -> Option<String> {
         let line = line.trim();
         if line.is_empty() {
@@ -307,8 +315,15 @@ impl McpServer {
             Ok(v) => v,
             Err(e) => return Some(rpc_error(Value::Null, -32700, format!("parse error: {e}")).to_string()),
         };
+        self.handle_message(msg).map(|r| r.to_string())
+    }
+
+    /// Handle one already-parsed JSON-RPC message. Returns a response/server-initiated message
+    /// value when one should be sent back over the transport, `None` for a notification that
+    /// needs no reply.
+    pub fn handle_message(&mut self, msg: Value) -> Option<Value> {
         if msg.is_array() {
-            return Some(rpc_error(Value::Null, -32600, "batch requests are not supported").to_string());
+            return Some(rpc_error(Value::Null, -32600, "batch requests are not supported"));
         }
         let id = msg.get("id").cloned().filter(|v| !v.is_null());
         let Some(method) = msg.get("method").and_then(|m| m.as_str()).map(|s| s.to_string()) else {
@@ -318,13 +333,13 @@ impl McpServer {
                 self.apply_roots_list_response(msg.get("result"));
                 return None;
             }
-            return id.map(|id| rpc_error(id, -32600, "invalid request: missing method").to_string());
+            return id.map(|id| rpc_error(id, -32600, "invalid request: missing method"));
         };
         let params = msg.get("params").cloned().unwrap_or(Value::Null);
         if self.log {
             eprintln!("[tabularium-mcp] <- {method}");
         }
-        let response = match (method.as_str(), id) {
+        match (method.as_str(), id) {
             ("initialize", Some(id)) => Some(rpc_result(id, self.initialize(&params))),
             ("initialize", None) => None,
             ("notifications/initialized", _) => {
@@ -341,8 +356,7 @@ impl McpServer {
             }
             (_, None) => None,
             (m, Some(id)) => Some(rpc_error(id, -32601, format!("method not found: {m}"))),
-        };
-        response.map(|r| r.to_string())
+        }
     }
 
     fn initialize(&mut self, params: &Value) -> Value {
