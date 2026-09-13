@@ -162,6 +162,7 @@ mod tests {
             checks: vec![],
             channel: "test".into(),
             trust: None,
+            merged_from: vec![],
             meta: None,
         })
         .unwrap()

@@ -116,7 +116,7 @@ pub fn tool_definitions() -> Vec<Value> {
         }),
         json!({
             "name": "memory_remember",
-            "description": "Derive a durable memory from evidence. kind=fact|reference|note need no special trust; kind=preference|instruction require that ALL evidence be user utterances (rejected otherwise). Attach checks so recall can flag the memory as stale when the world changes. Use subject to update an existing fact in place (older memory with the same subject is superseded).",
+            "description": "Derive a durable memory from evidence. kind=fact|reference|note need no special trust; kind=preference|instruction require that ALL evidence be user utterances (rejected otherwise). Attach checks so recall can flag the memory as stale when the world changes. Use subject to update an existing fact in place (older memory with the same subject is superseded). Use merged_from to consolidate several existing active memories into this one (e.g. after memory_duplicates flags them) -- each is superseded, and its trust is automatically folded in so a merge can never raise trust above the weakest source.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -124,6 +124,7 @@ pub fn tool_definitions() -> Vec<Value> {
                     "text": {"type": "string", "description": "The memory, one to three sentences, self-contained."},
                     "subject": {"type": "string", "description": "Optional stable key, e.g. 'db.engine' or 'user.editor'. Newer memory with the same subject supersedes the older one."},
                     "evidence": {"type": "array", "items": {"type": "string"}, "description": "Event ids from memory_observe that support this memory."},
+                    "merged_from": {"type": "array", "items": {"type": "string"}, "description": "Ids of active memories this one consolidates; each must currently be active. Retired (superseded) by this one."},
                     "checks": {
                         "type": "array",
                         "description": "Validity checks run at recall time. Relative paths resolve against the project root.",
@@ -431,6 +432,7 @@ impl McpServer {
                     checks: parse_checks(args)?,
                     channel: self.channel.clone(),
                     trust: None,
+                    merged_from: arg_string_list(args, "merged_from")?,
                     meta: args.get("meta").cloned().filter(|m| m.is_object()),
                 })?;
                 Ok(json!({

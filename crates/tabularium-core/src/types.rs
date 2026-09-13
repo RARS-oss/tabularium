@@ -231,6 +231,12 @@ pub struct DerivePayload {
     pub checks: Vec<Check>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub meta: Option<Value>,
+    /// Ids of active memories this one consolidates. Each is superseded by this derive, exactly
+    /// like subject supersession but keyed by explicit id instead of a shared subject. Always a
+    /// subset of `evidence` by construction, so trust can never rise through a merge. Old ledger
+    /// events predate this field and deserialize to an empty list.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub merged_from: Vec<String>,
 }
 
 /// Payload of a [`EventKind::Forget`] event.

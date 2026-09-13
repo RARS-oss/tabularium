@@ -30,6 +30,10 @@ pub struct RememberInput {
     /// Trust of the remember act itself; only matters when there is no evidence. Defaults to Agent.
     pub trust: Option<Trust>,
     pub meta: Option<Value>,
+    /// Ids of active memories this one consolidates; each is superseded by the new memory.
+    /// Automatically unioned into `evidence` before trust is computed, so a merge can never raise
+    /// trust above the weakest of what it merges.
+    pub merged_from: Vec<String>,
 }
 
 /// Result of a backfill of missing vectors.
@@ -204,6 +208,30 @@ impl Vault {
             evidence_trusts.push(ev.trust);
             evidence_ids.push(id.to_string());
         }
+
+        let mut merged_from = Vec::with_capacity(input.merged_from.len());
+        for id in &input.merged_from {
+            let id = id.trim();
+            if merged_from.iter().any(|x: &String| x == id) {
+                continue;
+            }
+            let source = self
+                .get_memory(id)?
+                .ok_or_else(|| Error::NotFound(format!("merged_from memory '{id}' does not exist")))?;
+            if !source.is_active() {
+                return Err(Error::Invalid(format!("merged_from memory '{id}' is not active (already superseded or forgotten)")));
+            }
+            // Folding the source's own trust into this derive's evidence is what makes a merge
+            // unable to launder trust: a memory's id is its derive event's id, and that event's
+            // trust is exactly the memory's own already-computed trust.
+            if !evidence_ids.iter().any(|x| x == id) {
+                let ev = self.get_event(id)?.ok_or_else(|| Error::Integrity(format!("merged_from '{id}' memory has no backing event")))?;
+                evidence_trusts.push(ev.trust);
+                evidence_ids.push(id.to_string());
+            }
+            merged_from.push(id.to_string());
+        }
+
         let trust = derive_trust(recorder, &evidence_trusts);
         if input.kind.requires_user_trust() && trust < Trust::User {
             return Err(Error::Policy(format!(
@@ -223,6 +251,7 @@ impl Vault {
             evidence: evidence_ids,
             checks,
             meta: input.meta,
+            merged_from,
         })?;
         let text_for_embedding = payload["text"].as_str().unwrap_or_default().to_string();
         let ev = self.append_event(&channel, EventKind::Derive, recorder, payload)?;

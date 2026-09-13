@@ -99,6 +99,17 @@ fn apply_event(tx: &Transaction<'_>, ev: &Event) -> Result<()> {
                     params![ev.id, subject, ev.seq as i64],
                 )?;
             }
+            // Consolidation: this derive explicitly retires each of these ids, exactly like
+            // subject supersession but keyed by id instead of a shared subject. `forget`'s undo
+            // logic (`WHERE superseded_by = ?1`) already operates on sets, so undoing a merge
+            // that retired several ids at once needs no extra handling there.
+            for source in &d.merged_from {
+                tx.execute(
+                    "UPDATE memories SET superseded_by = ?1
+                     WHERE id = ?2 AND tombstoned = 0 AND superseded_by IS NULL",
+                    params![ev.id, source],
+                )?;
+            }
         }
         EventKind::Forget => {
             let Some(payload) = &ev.payload else { return Ok(()) };

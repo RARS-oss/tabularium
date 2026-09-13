@@ -72,6 +72,7 @@ fn run_ops(v: &mut Vault, ops: &[Op]) -> (Vec<Event>, Vec<String>) {
                     checks: vec![],
                     channel: "prop".into(),
                     trust: None,
+                    merged_from: vec![],
                     meta: None,
                 });
                 if let Ok(m) = r {
@@ -134,7 +135,7 @@ proptest! {
         for t in &texts {
             let _ = v.remember(RememberInput {
                 kind: MemoryKind::Fact, text: t.clone(), subject: None, evidence: vec![], checks: vec![],
-                channel: "prop".into(), trust: None, meta: None,
+                channel: "prop".into(), trust: None, merged_from: vec![], meta: None,
             });
         }
         let opts = RecallOptions { budget_tokens: budget, limit, ..Default::default() };

@@ -130,6 +130,9 @@ struct RememberArgs {
     /// Evidence event id (repeatable)
     #[arg(long = "evidence", short = 'e')]
     evidence: Vec<String>,
+    /// Id of an active memory this one consolidates (repeatable); each is superseded
+    #[arg(long = "merge")]
+    merge: Vec<String>,
     /// file_hash check on PATH (repeatable)
     #[arg(long = "check-file")]
     check_file: Vec<String>,
@@ -239,6 +242,7 @@ fn main() -> Result<()> {
                 checks,
                 channel: a.channel,
                 trust: None,
+                merged_from: a.merge,
                 meta: None,
             })?;
             if cli.json {

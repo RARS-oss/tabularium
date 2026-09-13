@@ -35,6 +35,7 @@ fn remember_in(kind: MemoryKind, text: &str, evidence: Vec<String>) -> RememberI
         checks: vec![],
         channel: "test".into(),
         trust: None,
+        merged_from: vec![],
         meta: None,
     }
 }
@@ -169,6 +170,88 @@ fn subject_supersedes_previous_memory() {
     let r = v.recall("database", &RecallOptions::default()).unwrap();
     assert_eq!(r.items.len(), 1);
     assert_eq!(r.items[0].id, second.id);
+}
+
+#[test]
+fn merge_supersedes_all_sources_and_folds_their_trust() {
+    let (_d, mut v) = new_vault();
+    let a = v.remember(remember_in(MemoryKind::Fact, "fact from agent trust", vec![])).unwrap();
+    assert_eq!(a.trust, Trust::Agent);
+    let b_input = RememberInput { trust: Some(Trust::Tool), ..remember_in(MemoryKind::Fact, "fact from tool trust", vec![]) };
+    let b = v.remember(b_input).unwrap();
+    assert_eq!(b.trust, Trust::Tool);
+
+    let merge_input =
+        RememberInput { merged_from: vec![a.id.clone(), b.id.clone()], ..remember_in(MemoryKind::Fact, "consolidated fact", vec![]) };
+    let merged = v.remember(merge_input).unwrap();
+
+    assert_eq!(merged.trust, Trust::Tool, "trust must be the weakest of what was merged, not the recorder's own");
+    let mut evidence = merged.evidence.clone();
+    evidence.sort();
+    let mut expected = vec![a.id.clone(), b.id.clone()];
+    expected.sort();
+    assert_eq!(evidence, expected, "merged_from ids are auto-folded into evidence");
+
+    let a_now = v.get_memory(&a.id).unwrap().unwrap();
+    let b_now = v.get_memory(&b.id).unwrap().unwrap();
+    assert_eq!(a_now.superseded_by.as_deref(), Some(merged.id.as_str()));
+    assert_eq!(b_now.superseded_by.as_deref(), Some(merged.id.as_str()));
+    assert_eq!(v.memories(false).unwrap().len(), 1);
+
+    let before = v.snapshot().unwrap();
+    v.compile(true).unwrap();
+    assert_eq!(before, v.snapshot().unwrap());
+}
+
+#[test]
+fn merge_cannot_launder_trust_into_a_steering_kind() {
+    let (_d, mut v) = new_vault();
+    let a = v.remember(remember_in(MemoryKind::Fact, "agent-trust fact A", vec![])).unwrap();
+    let b = v.remember(remember_in(MemoryKind::Fact, "agent-trust fact B", vec![])).unwrap();
+    let merge_input = RememberInput { merged_from: vec![a.id.clone(), b.id.clone()], ..remember_in(MemoryKind::Instruction, "do X", vec![]) };
+    let err = v.remember(merge_input).unwrap_err();
+    assert!(err.to_string().contains("user-level trust"), "{err}");
+    // Neither source was touched by the rejected attempt.
+    assert!(v.get_memory(&a.id).unwrap().unwrap().is_active());
+    assert!(v.get_memory(&b.id).unwrap().unwrap().is_active());
+}
+
+#[test]
+fn merge_validates_source_ids() {
+    let (_d, mut v) = new_vault();
+    let missing = RememberInput { merged_from: vec!["deadbeef".into()], ..remember_in(MemoryKind::Fact, "x", vec![]) };
+    assert!(v.remember(missing).is_err(), "merging a nonexistent id must error");
+
+    let mut a = remember_in(MemoryKind::Fact, "v1", vec![]);
+    a.subject = Some("s".into());
+    let first = v.remember(a).unwrap();
+    let mut b = remember_in(MemoryKind::Fact, "v2", vec![]);
+    b.subject = Some("s".into());
+    v.remember(b).unwrap(); // supersedes `first` via subject, so it's now inactive
+
+    let inactive = RememberInput { merged_from: vec![first.id.clone()], ..remember_in(MemoryKind::Fact, "y", vec![]) };
+    let err = v.remember(inactive).unwrap_err();
+    assert!(err.to_string().contains("not active"), "{err}");
+}
+
+#[test]
+fn forget_undoes_a_merge_reactivating_every_source() {
+    let (_d, mut v) = new_vault();
+    let a = v.remember(remember_in(MemoryKind::Fact, "source A", vec![])).unwrap();
+    let b = v.remember(remember_in(MemoryKind::Fact, "source B", vec![])).unwrap();
+    let merge_input = RememberInput { merged_from: vec![a.id.clone(), b.id.clone()], ..remember_in(MemoryKind::Fact, "merged", vec![]) };
+    let merged = v.remember(merge_input).unwrap();
+    assert_eq!(v.memories(false).unwrap().len(), 1);
+
+    v.forget(&merged.id, "bad merge", "test").unwrap();
+    let active = v.memories(false).unwrap();
+    let ids: Vec<&str> = active.iter().map(|m| m.id.as_str()).collect();
+    assert!(ids.contains(&a.id.as_str()) && ids.contains(&b.id.as_str()), "{ids:?}");
+    assert_eq!(active.len(), 2);
+
+    let before = v.snapshot().unwrap();
+    v.compile(true).unwrap();
+    assert_eq!(before, v.snapshot().unwrap());
 }
 
 #[test]
