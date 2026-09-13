@@ -71,6 +71,10 @@ fn arg_bool(args: &Value, key: &str, default: bool) -> bool {
     args.get(key).and_then(|v| v.as_bool()).unwrap_or(default)
 }
 
+fn arg_f64(args: &Value, key: &str) -> Option<f32> {
+    args.get(key).and_then(|v| v.as_f64()).map(|f| f as f32)
+}
+
 fn arg_string_list(args: &Value, key: &str) -> Result<Vec<String>> {
     match args.get(key) {
         None | Some(Value::Null) => Ok(vec![]),
@@ -164,6 +168,14 @@ pub fn tool_definitions() -> Vec<Value> {
             "inputSchema": {
                 "type": "object",
                 "properties": {"memory_id": {"type": "string"}}
+            }
+        }),
+        json!({
+            "name": "memory_contradictions",
+            "description": "Find active memories with different `subject`s whose stored embeddings look like the same specific claim — a possible conflict, not a proven one (no LLM judges the text; it's cosine similarity over stored vectors). Use when two labeled facts might have drifted apart, e.g. one plan was updated and a related one wasn't.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"threshold": {"type": "number", "description": "Override vault.toml's embeddings.contradiction_threshold for this call."}}
             }
         }),
         json!({
@@ -412,6 +424,10 @@ impl McpServer {
                 let stale = reports.iter().filter(|(_, s, _)| *s == Status::Stale).count();
                 Ok(json!({"checked": items.len(), "stale": stale, "items": items}))
             }
+            "memory_contradictions" => {
+                let r = self.vault.contradictions(&ContradictOptions { threshold: arg_f64(args, "threshold") })?;
+                Ok(serde_json::to_value(r)?)
+            }
             "memory_forget" => {
                 let id = require_str(args, "memory_id")?;
                 let ev = self.vault.forget(id, arg_str(args, "reason").unwrap_or(""), &self.channel.clone())?;
@@ -510,6 +526,13 @@ mod tests {
         r["result"].clone()
     }
 
+    fn server_with_embedder() -> (tempfile::TempDir, McpServer) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut v = Vault::init(&dir.path().join("v"), "t", Some(dir.path())).unwrap();
+        v.set_embedder(Some(Box::new(HashEmbedder::new(64))));
+        (dir, McpServer::new(v))
+    }
+
     #[test]
     fn handshake_and_tool_list() {
         let (_d, mut s) = server();
@@ -556,6 +579,29 @@ mod tests {
         assert_eq!(rc["structuredContent"]["kind"], "recall");
         let a = call(&mut s, 6, "memory_audit", json!({}));
         assert_eq!(a["structuredContent"]["ok"], true);
+    }
+
+    #[test]
+    fn memory_contradictions_flags_drifted_subjects() {
+        let (_d, mut s) = server_with_embedder();
+        for subject in ["plan.a", "plan.b"] {
+            let text = "ship vigil then oculus then fons then auctor then limen";
+            let o = call(&mut s, 1, "memory_observe", json!({"kind": "utterance", "content": text}));
+            let ev_id = o["structuredContent"]["event_id"].as_str().unwrap().to_string();
+            let m = call(&mut s, 2, "memory_remember", json!({"kind": "instruction", "text": text, "subject": subject, "evidence": [ev_id]}));
+            assert_eq!(m["isError"], false, "{m:?}");
+        }
+        let r = call(&mut s, 3, "memory_contradictions", json!({}));
+        assert_eq!(r["isError"], false, "{r:?}");
+        let sc = &r["structuredContent"];
+        assert_eq!(sc["pairs"].as_array().unwrap().len(), 1);
+        assert_eq!(sc["model"], "hash:64");
+        let receipt_id = sc["receipt"]["id"].as_str().unwrap().to_string();
+        let rc = call(&mut s, 4, "memory_receipt", json!({"id": receipt_id}));
+        assert_eq!(rc["isError"], false, "{rc:?}");
+
+        let strict = call(&mut s, 5, "memory_contradictions", json!({"threshold": 1.0001}));
+        assert!(strict["structuredContent"]["pairs"].as_array().unwrap().is_empty());
     }
 
     #[test]

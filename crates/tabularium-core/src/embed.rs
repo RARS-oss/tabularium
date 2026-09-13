@@ -120,6 +120,11 @@ pub struct EmbeddingConfig {
     /// Minimum quantized cosine for a memory to count as a semantic match.
     #[serde(default = "default_threshold")]
     pub threshold: f32,
+    /// Minimum quantized cosine between two differently-`subject`ed active memories for
+    /// `Vault::contradictions` to flag them as a possible conflict. Higher than `threshold`
+    /// because this needs "same specific claim", not "same topic".
+    #[serde(default = "default_contradiction_threshold")]
+    pub contradiction_threshold: f32,
     /// Model cache directory. Default: `~/.tabularium/models`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_dir: Option<String>,
@@ -139,9 +144,23 @@ fn default_threshold() -> f32 {
     0.30
 }
 
+/// Calibrated by dogfooding against a real vault (2026-09-13): the multilingual MiniLM model puts
+/// two genuinely-drifted paraphrased plans (`build-priority-order` vs `planned-projects-list`,
+/// same roadmap, one updated and one not) at cosine 0.544 — well under an initial guess of 0.72,
+/// which caught nothing. 0.50 catches that real case with a small margin.
+fn default_contradiction_threshold() -> f32 {
+    0.50
+}
+
 impl Default for EmbeddingConfig {
     fn default() -> Self {
-        EmbeddingConfig { enabled: true, model: default_model(), threshold: default_threshold(), cache_dir: None }
+        EmbeddingConfig {
+            enabled: true,
+            model: default_model(),
+            threshold: default_threshold(),
+            contradiction_threshold: default_contradiction_threshold(),
+            cache_dir: None,
+        }
     }
 }
 

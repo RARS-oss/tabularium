@@ -67,6 +67,13 @@ enum Cmd {
     },
     /// Run validity checks on one memory or all active ones
     Verify { memory_id: Option<String> },
+    /// Find active memories with different subjects that look like the same claim (possible
+    /// conflict, not a proven one — by embedding similarity, no LLM)
+    Contradictions {
+        /// Override vault.toml's embeddings.contradiction_threshold for this run
+        #[arg(long)]
+        threshold: Option<f32>,
+    },
     /// Tombstone a memory and redact its content
     Forget {
         memory_id: String,
@@ -315,6 +322,29 @@ fn main() -> Result<()> {
                 }
                 let stale = reports.iter().filter(|(_, s, _)| *s == Status::Stale).count();
                 println!("{} checked, {} stale", reports.len(), stale);
+            }
+        }
+        Cmd::Contradictions { threshold } => {
+            let mut v = open(&cli.vault)?;
+            let r = v.contradictions(&ContradictOptions { threshold })?;
+            if cli.json {
+                print_json(&r)?;
+            } else if r.model.is_none() {
+                println!("no embedder available; nothing to compare");
+            } else {
+                for p in &r.pairs {
+                    println!(
+                        "cos {:.3} :: [{}] {} \"{}\"\n              vs [{}] {} \"{}\"",
+                        p.cosine,
+                        p.a.subject,
+                        short(&p.a.id),
+                        p.a.text,
+                        p.b.subject,
+                        short(&p.b.id),
+                        p.b.text
+                    );
+                }
+                println!("{} subject-bearing memories considered, {} possible conflict(s) at threshold {:.2}", r.considered, r.pairs.len(), r.threshold);
             }
         }
         Cmd::Forget { memory_id, reason } => {

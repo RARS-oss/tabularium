@@ -172,6 +172,34 @@ fn subject_supersedes_previous_memory() {
 }
 
 #[test]
+fn contradictions_finds_drifted_subjects_and_signs_a_receipt() {
+    // Mirrors a real case: two labeled plans that drifted apart because only one was updated.
+    let (_d, mut v) = new_vault_with_hash_embedder();
+    let mk = |subject: &str, t: &str| RememberInput { subject: Some(subject.into()), ..remember_in(MemoryKind::Fact, t, vec![]) };
+    let a = v.remember(mk("build-priority-order", "ship vigil then oculus then fons then auctor then limen")).unwrap();
+    let b = v.remember(mk("planned-projects-list", "ship vigil then oculus then fons then auctor then limen")).unwrap();
+    let unrelated = v.remember(mk("env.cargo-path", "added cargo bin to PATH on windows")).unwrap();
+
+    let r = v.contradictions(&ContradictOptions::default()).unwrap();
+    assert_eq!(r.model.as_deref(), Some("hash:64"));
+    assert_eq!(r.considered, 3);
+    assert_eq!(r.pairs.len(), 1, "{:?}", r.pairs);
+    let pair = &r.pairs[0];
+    let ids: Vec<&str> = vec![pair.a.id.as_str(), pair.b.id.as_str()];
+    assert!(ids.contains(&a.id.as_str()) && ids.contains(&b.id.as_str()));
+    assert!(!ids.contains(&unrelated.id.as_str()));
+
+    // The receipt is auditable on its own, same as a recall receipt.
+    let stored = v.get_receipt(&r.receipt.id).unwrap().unwrap();
+    assert_eq!(stored.body["pairs"].as_array().unwrap().len(), 1);
+    verify_hex(&v.public_key_hex(), &sig_message(RECEIPT_DOMAIN, &r.receipt.id), &r.receipt.sig).unwrap();
+
+    // A stricter threshold than the near-identical text's cosine finds nothing.
+    let strict = v.contradictions(&ContradictOptions { threshold: Some(1.0001) }).unwrap();
+    assert!(strict.pairs.is_empty());
+}
+
+#[test]
 fn forget_undoes_supersession_consistently() {
     // i (subject s) -> j supersedes i -> l supersedes j -> forget j: i must now point at l,
     // exactly as a rebuild (where j's derive is redacted and never had a subject) would compute.

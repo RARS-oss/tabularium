@@ -89,7 +89,10 @@ pay for a model load.
 ## 4. Roadmap
 
 1. **Week 1 (done):** ledger, keys, compile, verify, recall, receipts, MCP stdio server, CLI, property tests.
-2. **Week 2:** stored embeddings + hybrid ranking (done); contradiction detection on `subject`; hooks that
+2. **Week 2:** stored embeddings + hybrid ranking (done); contradiction detection on `subject` (done —
+   `Vault::contradictions` pairs active memories with *different* subjects whose stored embeddings
+   exceed a separate, stricter threshold than recall's, since supersession already resolves same-subject
+   drift; no LLM judges the pair, so it's reported as a possible conflict, not a proven one); hooks that
    record file reads as evidence; `roots` support in MCP; a status for memories that carry no checks
    ("unchecked") distinct from checks that could not run.
 3. **Week 3:** consolidation (dedup, merge) as explicit logged operations; shared vaults with

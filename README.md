@@ -45,7 +45,7 @@ on every prompt, and one that records file edits as evidence automatically.
 ```
 
 The server exposes: `memory_observe`, `memory_remember`, `memory_recall`, `memory_hint`, `memory_verify`,
-`memory_forget`, `memory_list`, `memory_audit`, `memory_receipt`, `memory_info`.
+`memory_contradictions`, `memory_forget`, `memory_list`, `memory_audit`, `memory_receipt`, `memory_info`.
 
 ## Use from the shell
 
@@ -56,6 +56,7 @@ tabularium remember --kind instruction -e 3f9c… "Deploy only from the release 
 tabularium remember --kind fact --check-symbol src/lib.rs::compile_ledger "compile_ledger lives in src/lib.rs"
 tabularium recall "how do we deploy" --budget 400
 tabularium verify              # which memories went stale?
+tabularium contradictions      # which differently-labeled memories now look like the same claim?
 tabularium audit               # chain, signatures, commitments, receipts
 tabularium compile --rebuild   # replay the ledger from genesis; must equal the incremental view
 tabularium embed               # write vectors for memories that have none (first run downloads the model)

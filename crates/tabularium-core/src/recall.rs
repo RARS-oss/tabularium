@@ -420,7 +420,7 @@ impl Vault {
         Ok(HintResult { matched: scored.len(), items })
     }
 
-    fn sign_receipt(&self, kind: &str, body: serde_json::Value, ts: &str) -> Result<Receipt> {
+    pub(crate) fn sign_receipt(&self, kind: &str, body: serde_json::Value, ts: &str) -> Result<Receipt> {
         let id = blake3_hex(canonical_json(&body).as_bytes());
         let sig = self.keys.sign_hex(&crate::canon::sig_message(RECEIPT_DOMAIN, &id))?;
         self.conn.execute(

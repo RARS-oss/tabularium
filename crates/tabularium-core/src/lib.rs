@@ -12,6 +12,7 @@
 
 pub mod canon;
 pub mod compile;
+pub mod contradict;
 pub mod embed;
 pub mod error;
 pub mod keys;
@@ -23,6 +24,7 @@ pub mod vault;
 pub mod verify;
 
 pub use compile::CompileReport;
+pub use contradict::{ContradictOptions, ContradictionMemberRef, ContradictionPair, ContradictionReport};
 pub use embed::{Embedder, EmbeddingConfig, HashEmbedder};
 pub use error::{Error, Result};
 pub use ledger::{derive_trust, AuditReport, EmbedReport, ObserveInput, RememberInput};
