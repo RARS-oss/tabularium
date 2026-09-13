@@ -772,6 +772,51 @@ fn cross_script_pairs_use_the_lower_semantic_threshold() {
 }
 
 #[test]
+fn timeline_html_is_self_contained_windowed_and_shows_writer_provenance() {
+    let (_d, mut v) = new_vault();
+
+    let writer = tabularium_core::keys::VaultKeys::generate().unwrap();
+    let pubkey = writer.public_key_hex();
+    v.config_mut().policy.writers.insert(pubkey.clone(), WriterPolicy { name: "alice".into(), max_trust: Trust::User });
+    v.save_config().unwrap();
+    v.set_writer_identity(Some(writer));
+
+    observe(&mut v, EventKind::Utterance, "OLDEST_MARKER we deploy from release branch only");
+    for i in 0..5 {
+        observe(&mut v, EventKind::Utterance, &format!("filler event number {i}"));
+    }
+    let last = observe(&mut v, EventKind::Utterance, "NEWEST_MARKER the database is postgres");
+    let m = v.remember(remember_in(MemoryKind::Fact, "the database is postgres", vec![last.id.clone()])).unwrap();
+
+    // Windowed to the 3 most recent events: the oldest marker must not appear, the newest must.
+    let html = v.render_timeline_html(3).unwrap();
+    assert!(html.starts_with("<!doctype html>"));
+    assert!(!html.contains("OLDEST_MARKER"), "windowed out by limit");
+    assert!(html.contains("NEWEST_MARKER"), "within the window");
+    assert!(html.contains(&pubkey[..10]), "writer pubkey prefix should be embedded for provenance display");
+    assert!(html.contains("alice"), "the registered writer name should be visible");
+    assert!(html.contains(&m.id), "the memory's evidence chain should reference its citing event");
+    assert!(html.contains("event_count_total"), "should report the true total, not just the window size");
+
+    // Unlimited window: the oldest marker is back.
+    let full = v.render_timeline_html(100).unwrap();
+    assert!(full.contains("OLDEST_MARKER"));
+}
+
+#[test]
+fn timeline_html_omits_embed_vectors_from_the_export() {
+    let (_d, mut v) = new_vault_with_hash_embedder();
+    v.remember(remember_in(MemoryKind::Fact, "the ledger hash chain uses blake3", vec![])).unwrap();
+    let embed_event = v.events(0, 100).unwrap().into_iter().find(|e| e.kind == EventKind::Embed).unwrap();
+    let raw_hex = embed_event.payload.unwrap()["vector_hex"].as_str().unwrap().to_string();
+    assert!(raw_hex.len() > 100, "hash:64 vectors are still a nontrivial hex blob");
+
+    let html = v.render_timeline_html(100).unwrap();
+    assert!(!html.contains(&raw_hex), "the raw vector hex should not be shipped in the export");
+    assert!(html.contains("bytes, omitted from export"), "a short placeholder should stand in for it");
+}
+
+#[test]
 fn embeddings_survive_rebuild_and_are_redacted_on_forget() {
     let (_d, mut v) = new_vault_with_hash_embedder();
     let keep = v.remember(remember_in(MemoryKind::Fact, "keep this one", vec![])).unwrap();

@@ -20,6 +20,7 @@ pub mod keys;
 pub mod ledger;
 pub mod recall;
 pub mod text;
+pub mod timeline;
 pub mod types;
 pub mod vault;
 pub mod verify;

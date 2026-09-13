@@ -190,5 +190,17 @@ pay for a model load.
    supplied), and the server binds to loopback by default -- binding wider prints a loud warning
    instead of a silent success. There is deliberately no TLS: this targets local demos and networks
    you already trust, not an internet-facing service; put a real reverse proxy in front for that.
-7. **Later:** GUI timeline ("what did the agent know at T"), sampling-based extraction through
-   the host.
+7. **GUI timeline (done):** `tabularium timeline` / the `memory_timeline` MCP tool render a
+   single self-contained HTML file (inlined CSS/JS, no CDN, no server, no network) answering "what
+   did the agent know at T" -- a chronological view of every ledger event and, for each active
+   memory, its exact evidence chain. `audit()`/`verify()` already prove the chain is intact; this
+   is for a human looking at it, so it's built for scanning rather than re-deriving what those
+   already check: every event's trust and writer (registered name if any, flagged if unregistered)
+   sit right next to it, and a memory's evidence chips jump to the events that produced it. Windowed
+   to the most recent N events (`--limit`, default 2000) so a huge ledger doesn't balloon the file;
+   an `embed` event's payload is a bare float vector with no human-meaningful content, so its
+   `vector_hex` is replaced with a byte-count placeholder rather than shipped in full. Pure
+   presentation over already-fetched data (`tabularium-core::timeline`, no I/O of its own) so both
+   the CLI and the MCP tool share one renderer and stay in sync automatically.
+8. **Later:** sampling-based extraction through the host, and the portfolio projects this one
+   unblocks.

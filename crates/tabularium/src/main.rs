@@ -131,6 +131,16 @@ enum Cmd {
     },
     /// Vault status
     Info,
+    /// Write a self-contained HTML timeline of the ledger and every memory's evidence chain --
+    /// zero-config, no server, no network: open the file in a browser.
+    Timeline {
+        /// Output path (default: tabularium-timeline.html in the current directory)
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Show only the most recent N events (default 2000)
+        #[arg(long, default_value_t = 2000)]
+        limit: usize,
+    },
     /// Serve the Model Context Protocol over stdio (creates the vault if missing)
     Serve {
         /// Serve over HTTP instead of stdio (for networked multi-agent use; see docs/DESIGN.md).
@@ -652,6 +662,17 @@ fn main() -> Result<()> {
                     (Some(pk), None) => println!("writer    {pk} (unregistered -- capped at external)"),
                     (None, _) => println!("writer    none (vault key signs alone)"),
                 }
+            }
+        }
+        Cmd::Timeline { out, limit } => {
+            let v = open(&cli.vault, &cli.identity)?;
+            let html = v.render_timeline_html(limit).map_err(|e| anyhow!("{e}"))?;
+            let out = out.unwrap_or_else(|| PathBuf::from("tabularium-timeline.html"));
+            std::fs::write(&out, html).with_context(|| format!("writing {}", out.display()))?;
+            if cli.json {
+                print_json(&serde_json::json!({"out": out}))?;
+            } else {
+                println!("wrote {}", out.display());
             }
         }
         Cmd::Serve { http, bind, token } => {

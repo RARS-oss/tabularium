@@ -245,6 +245,17 @@ pub fn tool_definitions() -> Vec<Value> {
             "inputSchema": {"type": "object", "properties": {}}
         }),
         json!({
+            "name": "memory_timeline",
+            "description": "Write a self-contained HTML timeline of the ledger and every memory's evidence chain (which writer, at what trust, backs each fact/preference/instruction) -- zero-config, no server. Returns the file path; open it in a browser.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "out": {"type": "string", "description": "Output path (default: tabularium-timeline.html in the current directory)."},
+                    "limit": {"type": "integer", "default": 2000, "minimum": 1, "description": "Show only the most recent N ledger events."}
+                }
+            }
+        }),
+        json!({
             "name": "memory_info",
             "description": "Vault location, project root, ledger head, counts, public key, and this session's writer identity (if any) with its registered name.",
             "inputSchema": {"type": "object", "properties": {}}
@@ -535,6 +546,13 @@ impl McpServer {
             }
             "memory_audit" => Ok(serde_json::to_value(self.vault.audit()?)?),
             "memory_embed" => Ok(serde_json::to_value(self.vault.embed_missing()?)?),
+            "memory_timeline" => {
+                let limit = arg_u64(args, "limit").unwrap_or(2000).max(1) as usize;
+                let out = arg_str(args, "out").map(std::path::PathBuf::from).unwrap_or_else(|| std::path::PathBuf::from("tabularium-timeline.html"));
+                let html = self.vault.render_timeline_html(limit)?;
+                std::fs::write(&out, html)?;
+                Ok(json!({"out": out.display().to_string()}))
+            }
             "memory_receipt" => {
                 let id = require_str(args, "id")?;
                 let r = self.vault.get_receipt(id)?.ok_or_else(|| Error::NotFound(format!("receipt '{id}'")))?;
@@ -781,6 +799,22 @@ mod tests {
         let with_writer = call(&mut s, 2, "memory_info", json!({}));
         assert_eq!(with_writer["structuredContent"]["writer"]["public_key"], pubkey);
         assert_eq!(with_writer["structuredContent"]["writer"]["registered_name"], "alice");
+    }
+
+    #[test]
+    fn memory_timeline_writes_a_self_contained_html_file() {
+        let (d, mut s) = server();
+        let o = call(&mut s, 1, "memory_observe", json!({"kind": "utterance", "content": "we deploy from release branch only"}));
+        let ev_id = o["structuredContent"]["event_id"].as_str().unwrap().to_string();
+        call(&mut s, 2, "memory_remember", json!({"kind": "fact", "text": "deploy from release branch", "evidence": [ev_id]}));
+
+        let out_path = d.path().join("timeline.html");
+        let r = call(&mut s, 3, "memory_timeline", json!({"out": out_path.to_str().unwrap()}));
+        assert_eq!(r["isError"], false, "{r:?}");
+        assert_eq!(r["structuredContent"]["out"], out_path.to_str().unwrap());
+        let html = std::fs::read_to_string(&out_path).unwrap();
+        assert!(html.starts_with("<!doctype html>"));
+        assert!(html.contains("deploy from release branch"));
     }
 
     #[test]

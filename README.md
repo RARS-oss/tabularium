@@ -47,7 +47,7 @@ on every prompt, and one that records file reads and edits as evidence automatic
 
 The server exposes: `memory_observe`, `memory_remember`, `memory_recall`, `memory_hint`, `memory_verify`,
 `memory_contradictions`, `memory_duplicates`, `memory_forget`, `memory_list`, `memory_audit`,
-`memory_receipt`, `memory_info`.
+`memory_receipt`, `memory_info`, `memory_embed`, `memory_timeline`.
 
 ## Use from the shell
 
@@ -86,6 +86,20 @@ elsewhere -- there is no TLS built in, so treat this as a local/trusted-network 
 reverse proxy in front if you need to expose it further. See `docs/DESIGN.md` §"HTTP transport" for
 the full design and why each of those choices was made.
 
+## Seeing the evidence chain (timeline)
+
+`tabularium audit` proves the chain is intact; `tabularium timeline` is for a human to actually look
+at it -- a single self-contained HTML file (no server, no CDN, works offline) showing the ledger
+chronologically and, for each memory, exactly which events back it and at what trust:
+
+```sh
+tabularium timeline --out timeline.html   # or call memory_timeline from an MCP client
+```
+
+Each event shows its writer (registered name if any, "unregistered" if not) right next to its
+trust level, so a `fact` or `instruction` quietly resting on an `external` or unregistered-writer
+event is something you'd actually notice, not something buried in a JSON dump.
+
 ### Sharing a vault between writers
 
 ```sh
@@ -114,9 +128,9 @@ never requires touching the vault first. `tabularium audit` verifies every write
 ## Layout
 
 ```
-crates/tabularium-core   ledger, keys, compile, verify, recall
+crates/tabularium-core   ledger, keys, compile, verify, recall, timeline visualizer
 crates/tabularium-mcp    JSON-RPC MCP server: stdio (no async runtime) + optional HTTP transport
-crates/tabularium        CLI + `serve` (stdio or --http)
+crates/tabularium        CLI + `serve` (stdio or --http) + `timeline`
 integrations/claude-code example .mcp.json and hooks
 docs/DESIGN.md           the design and the research claims
 evals/                   Python benchmark harness: H1-H4 against DESIGN.md's claims
@@ -126,8 +140,9 @@ evals/                   Python benchmark harness: H1-H4 against DESIGN.md's cla
 
 v0.2: core, stored embeddings and hybrid recall, contradiction and duplicate detection, explicit merge,
 evidence redaction, shared vaults with per-key trust, a Python eval harness against DESIGN.md's
-H1-H4 claims (`evals/`, real pilot-scale numbers in `evals/paper/skeleton.md`), and an optional HTTP
-transport for networked multi-agent use. See `docs/DESIGN.md` for what's next: a GUI timeline and
-the portfolio projects this one unblocks.
+H1-H4 claims (`evals/`, real pilot-scale numbers in `evals/paper/skeleton.md`), an optional HTTP
+transport for networked multi-agent use, and a zero-config HTML timeline visualizer. See
+`docs/DESIGN.md` for what's next: sampling-based extraction through the host, and the portfolio
+projects this one unblocks.
 
 License: MIT OR Apache-2.0.
