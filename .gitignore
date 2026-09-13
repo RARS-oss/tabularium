@@ -5,4 +5,6 @@
 *.db-shm
 /.tabularium
 /evals/.venv
+/evals/data
+/evals/results
 __pycache__/
