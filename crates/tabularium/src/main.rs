@@ -74,6 +74,13 @@ enum Cmd {
         #[arg(long)]
         threshold: Option<f32>,
     },
+    /// Find active memories, any subjects, whose stored embeddings are near-identical --
+    /// candidates to consolidate with `remember --merge` (detection only, no auto-merge)
+    Duplicates {
+        /// Override vault.toml's embeddings.duplicate_threshold for this run
+        #[arg(long)]
+        threshold: Option<f32>,
+    },
     /// Tombstone a memory and redact its content
     Forget {
         memory_id: String,
@@ -349,6 +356,25 @@ fn main() -> Result<()> {
                     );
                 }
                 println!("{} subject-bearing memories considered, {} possible conflict(s) at threshold {:.2}", r.considered, r.pairs.len(), r.threshold);
+            }
+        }
+        Cmd::Duplicates { threshold } => {
+            let mut v = open(&cli.vault)?;
+            let r = v.duplicates(&DuplicateOptions { threshold })?;
+            if cli.json {
+                print_json(&r)?;
+            } else if r.model.is_none() {
+                println!("no embedder available; nothing to compare");
+            } else {
+                for p in &r.pairs {
+                    println!("cos {:.3} :: {} \"{}\"\n              vs {} \"{}\"", p.cosine, short(&p.a.id), p.a.text, short(&p.b.id), p.b.text);
+                }
+                println!(
+                    "{} active memories considered, {} likely duplicate(s) at threshold {:.2} -- consolidate with `remember --merge`",
+                    r.considered,
+                    r.pairs.len(),
+                    r.threshold
+                );
             }
         }
         Cmd::Forget { memory_id, reason } => {

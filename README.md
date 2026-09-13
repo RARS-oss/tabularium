@@ -45,7 +45,8 @@ on every prompt, and one that records file reads and edits as evidence automatic
 ```
 
 The server exposes: `memory_observe`, `memory_remember`, `memory_recall`, `memory_hint`, `memory_verify`,
-`memory_contradictions`, `memory_forget`, `memory_list`, `memory_audit`, `memory_receipt`, `memory_info`.
+`memory_contradictions`, `memory_duplicates`, `memory_forget`, `memory_list`, `memory_audit`,
+`memory_receipt`, `memory_info`.
 
 ## Use from the shell
 
@@ -57,6 +58,8 @@ tabularium remember --kind fact --check-symbol src/lib.rs::compile_ledger "compi
 tabularium recall "how do we deploy" --budget 400
 tabularium verify              # which memories went stale?
 tabularium contradictions      # which differently-labeled memories now look like the same claim?
+tabularium duplicates          # which memories, any subject, are near-identical text?
+tabularium remember --kind fact --merge 3f9c… --merge a01e… "consolidated wording"  # retires both
 tabularium audit               # chain, signatures, commitments, receipts
 tabularium compile --rebuild   # replay the ledger from genesis; must equal the incremental view
 tabularium embed               # write vectors for memories that have none (first run downloads the model)

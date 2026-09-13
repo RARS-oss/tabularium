@@ -14,6 +14,7 @@ use crate::types::{Memory, MemoryKind, Receipt, Trust};
 use crate::vault::{now_rfc3339, Vault};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::collections::HashMap;
 
 /// Bound on how many subject-bearing active memories are compared pairwise, newest first. Keeps
 /// the O(n^2) scan cheap regardless of vault size, mirroring `recall::MAX_VERIFY_CANDIDATES`.
@@ -26,8 +27,9 @@ pub struct ContradictOptions {
     pub threshold: Option<f32>,
 }
 
+/// One active memory's identifying fields, shared by contradiction and duplicate reports.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ContradictionMemberRef {
+pub struct SimilarityMemberRef {
     pub id: String,
     pub subject: String,
     pub kind: MemoryKind,
@@ -36,9 +38,9 @@ pub struct ContradictionMemberRef {
     pub created_at: String,
 }
 
-impl ContradictionMemberRef {
-    fn from(m: &Memory) -> ContradictionMemberRef {
-        ContradictionMemberRef {
+impl SimilarityMemberRef {
+    pub(crate) fn from(m: &Memory) -> SimilarityMemberRef {
+        SimilarityMemberRef {
             id: m.id.clone(),
             subject: m.subject.clone().unwrap_or_default(),
             kind: m.kind,
@@ -51,8 +53,8 @@ impl ContradictionMemberRef {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContradictionPair {
-    pub a: ContradictionMemberRef,
-    pub b: ContradictionMemberRef,
+    pub a: SimilarityMemberRef,
+    pub b: SimilarityMemberRef,
     pub cosine: f32,
 }
 
@@ -65,6 +67,48 @@ pub struct ContradictionReport {
     pub considered: usize,
     pub pairs: Vec<ContradictionPair>,
     pub receipt: Receipt,
+}
+
+/// One pair from a pairwise similarity scan, by id only -- the caller attaches whatever member
+/// details its own report type needs.
+pub(crate) struct SimilarPair {
+    pub a_id: String,
+    pub b_id: String,
+    pub cosine: f32,
+}
+
+/// Shared core of `contradictions()` and `duplicates()`: exact quantized cosine over every pair in
+/// `candidates` that has a stored vector and passes `pair_allowed`, at or above `threshold`, best
+/// first. No LLM, no approximate index -- the same guarantee `recall`'s semantic ranking makes.
+pub(crate) fn pairwise_similarity(
+    candidates: &[Memory],
+    vectors: &HashMap<String, Vec<f32>>,
+    threshold: f32,
+    pair_allowed: impl Fn(&Memory, &Memory) -> bool,
+) -> Vec<SimilarPair> {
+    let with_vectors: Vec<(&Memory, &Vec<f32>)> =
+        candidates.iter().filter_map(|m| vectors.get(&m.id).map(|v| (m, v))).collect();
+    let mut pairs = Vec::new();
+    for i in 0..with_vectors.len() {
+        let (a, va) = with_vectors[i];
+        for (b, vb) in with_vectors.iter().skip(i + 1) {
+            if !pair_allowed(a, b) {
+                continue;
+            }
+            let c = quantize(cosine(va, vb));
+            if c >= threshold {
+                pairs.push(SimilarPair { a_id: a.id.clone(), b_id: b.id.clone(), cosine: c });
+            }
+        }
+    }
+    pairs.sort_by(|p, q| {
+        q.cosine
+            .partial_cmp(&p.cosine)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| p.a_id.cmp(&q.a_id))
+            .then_with(|| p.b_id.cmp(&q.b_id))
+    });
+    pairs
 }
 
 impl Vault {
@@ -82,45 +126,46 @@ impl Vault {
         let model = self.embedding_model_id();
         let mut pairs = Vec::new();
         if let Some(model) = &model {
-            let vectors = self.embeddings_for_active(model)?;
-            let by_id: std::collections::HashMap<&str, &Vec<f32>> =
-                vectors.iter().map(|(id, v)| (id.as_str(), v)).collect();
-            let with_vectors: Vec<(&Memory, &Vec<f32>)> =
-                candidates.iter().filter_map(|m| by_id.get(m.id.as_str()).map(|v| (m, *v))).collect();
-            for i in 0..with_vectors.len() {
-                let (a, va) = with_vectors[i];
-                for (b, vb) in with_vectors.iter().skip(i + 1) {
-                    if a.subject == b.subject {
-                        continue;
-                    }
-                    let c = quantize(cosine(va, vb));
-                    if c >= threshold {
-                        pairs.push(ContradictionPair {
-                            a: ContradictionMemberRef::from(a),
-                            b: ContradictionMemberRef::from(b),
-                            cosine: c,
-                        });
-                    }
-                }
-            }
-            pairs.sort_by(|p, q| {
-                q.cosine
-                    .partial_cmp(&p.cosine)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-                    .then_with(|| p.a.id.cmp(&q.a.id))
-                    .then_with(|| p.b.id.cmp(&q.b.id))
-            });
+            let vectors: HashMap<String, Vec<f32>> = self.embeddings_for_active(model)?.into_iter().collect();
+            let by_id: HashMap<&str, &Memory> = candidates.iter().map(|m| (m.id.as_str(), m)).collect();
+            let raw = pairwise_similarity(&candidates, &vectors, threshold, |a, b| a.subject != b.subject);
+            pairs = raw
+                .into_iter()
+                .map(|p| ContradictionPair {
+                    a: SimilarityMemberRef::from(by_id[p.a_id.as_str()]),
+                    b: SimilarityMemberRef::from(by_id[p.b_id.as_str()]),
+                    cosine: p.cosine,
+                })
+                .collect();
         }
 
+        let receipt = self.sign_similarity_receipt("contradictions", &model, threshold, considered, &pairs, |p| (p.a.id.clone(), p.b.id.clone(), p.cosine))?;
+        Ok(ContradictionReport { model, threshold, considered, pairs, receipt })
+    }
+
+    /// Sign a receipt for a pairwise-similarity scan (`contradictions`/`duplicates`): pins the
+    /// ledger head, model, threshold, and exactly which pairs were reported.
+    pub(crate) fn sign_similarity_receipt<P>(
+        &self,
+        kind: &str,
+        model: &Option<String>,
+        threshold: f32,
+        considered: usize,
+        pairs: &[P],
+        as_ids: impl Fn(&P) -> (String, String, f32),
+    ) -> Result<Receipt> {
         let (head_seq, head_hash) = self.head()?;
         let pair_bodies: Vec<serde_json::Value> = pairs
             .iter()
-            .map(|p| json!({"a": p.a.id, "b": p.b.id, "cosine": p.cosine}))
+            .map(|p| {
+                let (a, b, cosine) = as_ids(p);
+                json!({"a": a, "b": b, "cosine": cosine})
+            })
             .collect();
         let result_hash = blake3_hex(crate::canon::canonical_json(&serde_json::Value::Array(pair_bodies.clone())).as_bytes());
         let ts = now_rfc3339();
         let body = json!({
-            "kind": "contradictions",
+            "kind": kind,
             "ts": ts,
             "ledger_head": {"seq": head_seq, "hash": head_hash},
             "model": model,
@@ -129,8 +174,7 @@ impl Vault {
             "pairs": pair_bodies,
             "result_hash": result_hash,
         });
-        let receipt = self.sign_receipt("contradictions", body, &ts)?;
-        Ok(ContradictionReport { model, threshold, considered, pairs, receipt })
+        self.sign_receipt(kind, body, &ts)
     }
 }
 

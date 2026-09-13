@@ -189,6 +189,14 @@ pub fn tool_definitions() -> Vec<Value> {
             }
         }),
         json!({
+            "name": "memory_duplicates",
+            "description": "Find active memories, any subjects, whose stored embeddings are near-identical -- the same claim probably recorded twice (no LLM judges the text; it's cosine similarity over stored vectors, at a much stricter threshold than memory_contradictions). Detection only: to actually consolidate a flagged pair, call memory_remember with merged_from set to their ids.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"threshold": {"type": "number", "description": "Override vault.toml's embeddings.duplicate_threshold for this call."}}
+            }
+        }),
+        json!({
             "name": "memory_forget",
             "description": "Forget a memory: appends a tombstone, redacts the stored content, and redacts any evidence event no longer cited by another active memory. Keeps the chain intact.",
             "inputSchema": {
@@ -483,6 +491,10 @@ impl McpServer {
                 let r = self.vault.contradictions(&ContradictOptions { threshold: arg_f64(args, "threshold") })?;
                 Ok(serde_json::to_value(r)?)
             }
+            "memory_duplicates" => {
+                let r = self.vault.duplicates(&DuplicateOptions { threshold: arg_f64(args, "threshold") })?;
+                Ok(serde_json::to_value(r)?)
+            }
             "memory_forget" => {
                 let id = require_str(args, "memory_id")?;
                 let report = self.vault.forget(id, arg_str(args, "reason").unwrap_or(""), &self.channel.clone())?;
@@ -711,6 +723,28 @@ mod tests {
 
         let strict = call(&mut s, 5, "memory_contradictions", json!({"threshold": 1.0001}));
         assert!(strict["structuredContent"]["pairs"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn memory_duplicates_flags_and_merge_retires_them() {
+        let (_d, mut s) = server_with_embedder();
+        let text = "the deploy branch is release";
+        let mut ids = Vec::new();
+        for i in 1..=2 {
+            let o = call(&mut s, i, "memory_observe", json!({"kind": "utterance", "content": text}));
+            let ev_id = o["structuredContent"]["event_id"].as_str().unwrap().to_string();
+            let m = call(&mut s, i + 10, "memory_remember", json!({"kind": "note", "text": text, "evidence": [ev_id]}));
+            assert_eq!(m["isError"], false, "{m:?}");
+            ids.push(m["structuredContent"]["memory_id"].as_str().unwrap().to_string());
+        }
+        let r = call(&mut s, 20, "memory_duplicates", json!({}));
+        assert_eq!(r["isError"], false, "{r:?}");
+        assert_eq!(r["structuredContent"]["pairs"].as_array().unwrap().len(), 1);
+
+        let merged = call(&mut s, 21, "memory_remember", json!({"kind": "note", "text": "consolidated", "merged_from": ids}));
+        assert_eq!(merged["isError"], false, "{merged:?}");
+        let after = call(&mut s, 22, "memory_duplicates", json!({}));
+        assert!(after["structuredContent"]["pairs"].as_array().unwrap().is_empty());
     }
 
     #[test]

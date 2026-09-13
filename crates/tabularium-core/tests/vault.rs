@@ -283,6 +283,30 @@ fn contradictions_finds_drifted_subjects_and_signs_a_receipt() {
 }
 
 #[test]
+fn duplicates_finds_repeated_notes_and_a_merge_retires_them() {
+    let (_d, mut v) = new_vault_with_hash_embedder();
+    let a = v.remember(remember_in(MemoryKind::Note, "the deploy branch is release", vec![])).unwrap();
+    let b = v.remember(remember_in(MemoryKind::Note, "the deploy branch is release", vec![])).unwrap();
+    let unrelated = v.remember(remember_in(MemoryKind::Note, "unrelated note about something else entirely", vec![])).unwrap();
+
+    let r = v.duplicates(&DuplicateOptions::default()).unwrap();
+    assert_eq!(r.model.as_deref(), Some("hash:64"));
+    assert_eq!(r.considered, 3);
+    assert_eq!(r.pairs.len(), 1, "{:?}", r.pairs);
+    let pair = &r.pairs[0];
+    let ids: Vec<&str> = vec![pair.a.id.as_str(), pair.b.id.as_str()];
+    assert!(ids.contains(&a.id.as_str()) && ids.contains(&b.id.as_str()));
+    assert!(!ids.contains(&unrelated.id.as_str()));
+    verify_hex(&v.public_key_hex(), &sig_message(RECEIPT_DOMAIN, &r.receipt.id), &r.receipt.sig).unwrap();
+
+    // Consolidate the flagged pair; the next scan must no longer surface it.
+    let merge_input = RememberInput { merged_from: vec![a.id, b.id], ..remember_in(MemoryKind::Note, "the deploy branch is release", vec![]) };
+    v.remember(merge_input).unwrap();
+    let after = v.duplicates(&DuplicateOptions::default()).unwrap();
+    assert!(after.pairs.is_empty(), "{:?}", after.pairs);
+}
+
+#[test]
 fn forget_never_redacts_a_cited_memorys_own_record() {
     // A memory's id is its own derive event's id, so it's a valid (if unusual) evidence citation.
     // Forgetting the citing memory must never reach into the cited memory's independent lifecycle.

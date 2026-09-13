@@ -108,7 +108,16 @@ pay for a model load.
 3. **Week 3 (in progress):** `redact` of source events (done — `forget` now also redacts any
    evidence event that no other *active* memory still cites; an evidence event backing another
    live memory survives, checked directly against the memories view rather than assumed);
-   consolidation (dedup, merge) as explicit logged operations; shared vaults with per-key trust.
+   consolidation (done -- detection and merge are separate, composable operations, both explicit
+   and logged, no LLM in either: `Vault::duplicates` is `contradictions`'s pairwise-cosine scan
+   shared via `pairwise_similarity`, but with no subject filter and a far stricter threshold since
+   a duplicate should be near-identical text, not just "same specific claim" -- calibrated against
+   the real vault to 0.90, the gap between the most topically-related distinct memories observed
+   (<= 0.771) and near-verbatim text (0.98+). `Vault::remember` gained `merged_from: Vec<String>`:
+   each id must be an active memory, is auto-folded into `evidence` so trust cannot rise through a
+   merge, and is superseded by the new memory exactly like subject supersession, just keyed by id;
+   `forget`'s existing undo logic already operates on sets, so undoing a merge reactivates every
+   source with no extra code); shared vaults with per-key trust.
 4. **Week 4:** Python eval harness, baselines, benchmarks for staleness and injection, paper skeleton.
 5. **Later:** GUI timeline ("what did the agent know at T"), HTTP transport, sampling-based
    extraction through the host.

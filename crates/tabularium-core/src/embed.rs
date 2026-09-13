@@ -125,6 +125,11 @@ pub struct EmbeddingConfig {
     /// because this needs "same specific claim", not "same topic".
     #[serde(default = "default_contradiction_threshold")]
     pub contradiction_threshold: f32,
+    /// Minimum quantized cosine for `Vault::duplicates` to flag two active memories (any subjects,
+    /// including none) as near-duplicates worth consolidating. Higher still than
+    /// `contradiction_threshold`: a duplicate should be near-identical text, not just overlapping.
+    #[serde(default = "default_duplicate_threshold")]
+    pub duplicate_threshold: f32,
     /// Model cache directory. Default: `~/.tabularium/models`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_dir: Option<String>,
@@ -152,6 +157,15 @@ fn default_contradiction_threshold() -> f32 {
     0.50
 }
 
+/// Calibrated by dogfooding against a real vault (2026-09-13): the model puts even the most
+/// topically-related distinct memories at cosine <= 0.771, real paraphrases of the same fact
+/// noticeably lower still (~0.48), while near-verbatim text (casing/punctuation/a synonym swap)
+/// lands at 0.98+ and exact repeats at 1.0. 0.90 sits in the gap between "related" and
+/// "near-verbatim", so it only flags the latter.
+fn default_duplicate_threshold() -> f32 {
+    0.90
+}
+
 impl Default for EmbeddingConfig {
     fn default() -> Self {
         EmbeddingConfig {
@@ -159,6 +173,7 @@ impl Default for EmbeddingConfig {
             model: default_model(),
             threshold: default_threshold(),
             contradiction_threshold: default_contradiction_threshold(),
+            duplicate_threshold: default_duplicate_threshold(),
             cache_dir: None,
         }
     }
