@@ -34,7 +34,16 @@ pub struct McpServer {
     initialized: bool,
     protocol: String,
     log: bool,
+    /// Whether the client declared the `roots` capability at `initialize`.
+    client_roots_capable: bool,
+    /// Id of our own outstanding `roots/list` request, if any is in flight. We never pipeline more
+    /// than one: a fresh `roots/list_changed` while one is pending just re-sends with the same id.
+    pending_roots_request_id: Option<Value>,
 }
+
+/// Fixed id for our server-initiated `roots/list` request: we only ever have one in flight, so
+/// there is nothing to disambiguate by using a fresh id each time.
+const ROOTS_REQUEST_ID: &str = "tabularium:roots-list";
 
 fn rpc_error(id: Value, code: i64, message: impl Into<String>) -> Value {
     json!({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message.into()}})
@@ -266,6 +275,8 @@ impl McpServer {
             initialized: false,
             protocol: DEFAULT_PROTOCOL.to_string(),
             log: std::env::var("TABULARIUM_LOG").map(|v| v == "1").unwrap_or(false),
+            client_roots_capable: false,
+            pending_roots_request_id: None,
         }
     }
 
@@ -292,7 +303,12 @@ impl McpServer {
         }
         let id = msg.get("id").cloned().filter(|v| !v.is_null());
         let Some(method) = msg.get("method").and_then(|m| m.as_str()).map(|s| s.to_string()) else {
-            // A response to a server-initiated request (we send none) or garbage.
+            // A response to a server-initiated request: only `roots/list` today.
+            if id.is_some() && id == self.pending_roots_request_id {
+                self.pending_roots_request_id = None;
+                self.apply_roots_list_response(msg.get("result"));
+                return None;
+            }
             return id.map(|id| rpc_error(id, -32600, "invalid request: missing method").to_string());
         };
         let params = msg.get("params").cloned().unwrap_or(Value::Null);
@@ -304,8 +320,9 @@ impl McpServer {
             ("initialize", None) => None,
             ("notifications/initialized", _) => {
                 self.initialized = true;
-                None
+                self.request_roots_list()
             }
+            ("notifications/roots/list_changed", _) => self.request_roots_list(),
             ("ping", Some(id)) => Some(rpc_result(id, json!({}))),
             ("tools/list", Some(id)) => Some(rpc_result(id, json!({"tools": tool_definitions()}))),
             ("tools/call", Some(id)) => Some(self.tools_call(id, &params)),
@@ -325,12 +342,48 @@ impl McpServer {
         if let Some(name) = params.pointer("/clientInfo/name").and_then(|v| v.as_str()) {
             self.channel = sanitize_channel(name);
         }
+        self.client_roots_capable = params.pointer("/capabilities/roots").is_some();
         json!({
             "protocolVersion": self.protocol,
             "capabilities": {"tools": {"listChanged": false}},
             "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION},
             "instructions": INSTRUCTIONS,
         })
+    }
+
+    /// Ask a roots-capable client which directories it considers project roots. `None` when the
+    /// client never declared the `roots` capability at `initialize` -- most clients and every
+    /// non-interactive test don't, and the vault just keeps whatever root it opened with.
+    fn request_roots_list(&mut self) -> Option<Value> {
+        if !self.client_roots_capable {
+            return None;
+        }
+        self.pending_roots_request_id = Some(json!(ROOTS_REQUEST_ID));
+        Some(json!({"jsonrpc": "2.0", "id": ROOTS_REQUEST_ID, "method": "roots/list", "params": {}}))
+    }
+
+    /// Apply the client's answer to our `roots/list` request. Takes the first root (multi-root
+    /// workspaces aren't a vault concept -- there is exactly one root for check paths) and only
+    /// acts on a well-formed `file://` URI; anything else leaves the current root untouched rather
+    /// than erroring, since this is best-effort correctness, not a required handshake step.
+    fn apply_roots_list_response(&mut self, result: Option<&Value>) {
+        let Some(uri) = result
+            .and_then(|r| r.get("roots"))
+            .and_then(|r| r.as_array())
+            .and_then(|a| a.first())
+            .and_then(|r| r.get("uri"))
+            .and_then(|u| u.as_str())
+        else {
+            return;
+        };
+        if let Ok(url) = url::Url::parse(uri)
+            && let Ok(path) = url.to_file_path()
+        {
+            if self.log {
+                eprintln!("[tabularium-mcp] root set from MCP roots: {}", path.display());
+            }
+            self.vault.set_root(path);
+        }
     }
 
     fn tools_call(&mut self, id: Value, params: &Value) -> Value {
@@ -552,6 +605,60 @@ mod tests {
         assert_eq!(r["error"]["code"], -32700);
         let r = req(&mut s, 5, "initialize", json!({"protocolVersion": "1999-01-01"}));
         assert_eq!(r["result"]["protocolVersion"], DEFAULT_PROTOCOL);
+    }
+
+    #[test]
+    fn roots_capable_client_gets_asked_and_root_is_applied() {
+        let (_d, mut s) = server();
+        let project = tempfile::tempdir().unwrap();
+        req(&mut s, 1, "initialize", json!({"protocolVersion": "2025-06-18", "capabilities": {"roots": {}}, "clientInfo": {"name": "test", "version": "1"}}));
+
+        let line = s.handle_line(&json!({"jsonrpc": "2.0", "method": "notifications/initialized"}).to_string());
+        let ask: Value = serde_json::from_str(&line.expect("roots-capable client gets a roots/list request")).unwrap();
+        assert_eq!(ask["method"], "roots/list");
+        let req_id = ask["id"].clone();
+
+        let uri = url::Url::from_file_path(project.path()).unwrap().to_string();
+        let reply = json!({"jsonrpc": "2.0", "id": req_id, "result": {"roots": [{"uri": uri, "name": "proj"}]}});
+        assert!(s.handle_line(&reply.to_string()).is_none(), "a response to our own request needs no reply");
+        assert_eq!(s.vault().root(), project.path());
+    }
+
+    #[test]
+    fn roots_incapable_client_is_never_asked() {
+        let (_d, mut s) = server();
+        req(&mut s, 1, "initialize", json!({"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "test", "version": "1"}}));
+        assert!(s.handle_line(&json!({"jsonrpc": "2.0", "method": "notifications/initialized"}).to_string()).is_none());
+    }
+
+    #[test]
+    fn roots_list_changed_triggers_a_fresh_request() {
+        let (_d, mut s) = server();
+        req(&mut s, 1, "initialize", json!({"protocolVersion": "2025-06-18", "capabilities": {"roots": {}}, "clientInfo": {"name": "test", "version": "1"}}));
+        s.handle_line(&json!({"jsonrpc": "2.0", "method": "notifications/initialized"}).to_string());
+
+        let line = s.handle_line(&json!({"jsonrpc": "2.0", "method": "notifications/roots/list_changed"}).to_string());
+        let ask: Value = serde_json::from_str(&line.expect("list_changed re-asks for roots")).unwrap();
+        assert_eq!(ask["method"], "roots/list");
+    }
+
+    #[test]
+    fn malformed_roots_response_leaves_root_untouched() {
+        let (_d, mut s) = server();
+        let original = s.vault().root().to_path_buf();
+        req(&mut s, 1, "initialize", json!({"protocolVersion": "2025-06-18", "capabilities": {"roots": {}}, "clientInfo": {"name": "test", "version": "1"}}));
+        let line = s.handle_line(&json!({"jsonrpc": "2.0", "method": "notifications/initialized"}).to_string()).unwrap();
+        let req_id: Value = serde_json::from_str(&line).unwrap();
+        let req_id = req_id["id"].clone();
+
+        // No roots in the array at all.
+        s.handle_line(&json!({"jsonrpc": "2.0", "id": req_id, "result": {"roots": []}}).to_string());
+        assert_eq!(s.vault().root(), original);
+
+        // An error response instead of a result.
+        s.handle_line(&json!({"jsonrpc": "2.0", "method": "notifications/roots/list_changed"}).to_string());
+        s.handle_line(&json!({"jsonrpc": "2.0", "id": ROOTS_REQUEST_ID, "error": {"code": -1, "message": "nope"}}).to_string());
+        assert_eq!(s.vault().root(), original);
     }
 
     #[test]

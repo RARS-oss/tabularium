@@ -93,14 +93,18 @@ pay for a model load.
 ## 4. Roadmap
 
 1. **Week 1 (done):** ledger, keys, compile, verify, recall, receipts, MCP stdio server, CLI, property tests.
-2. **Week 2:** stored embeddings + hybrid ranking (done); contradiction detection on `subject` (done —
-   `Vault::contradictions` pairs active memories with *different* subjects whose stored embeddings
+2. **Week 2 (done):** stored embeddings + hybrid ranking; contradiction detection on `subject`
+   (`Vault::contradictions` pairs active memories with *different* subjects whose stored embeddings
    exceed a separate, stricter threshold than recall's, since supersession already resolves same-subject
    drift; no LLM judges the pair, so it's reported as a possible conflict, not a proven one); hooks that
-   record file reads as evidence (done — the existing `PostToolUse` hook already keyed off
+   record file reads as evidence (the existing `PostToolUse` hook already keyed off
    `tool_input.file_path`, generic across tools; the gap was the shipped matcher excluding `Read`,
-   now `Read|Edit|Write|MultiEdit`); `roots` support in MCP; a status for memories that carry no
-   checks ("unchecked", done — see §2.4) distinct from checks that could not run.
+   now `Read|Edit|Write|MultiEdit`); `roots` support in MCP (on `notifications/initialized` and
+   `notifications/roots/list_changed`, a roots-capable client gets asked `roots/list` — a server-
+   initiated request correlated by a fixed id on the same synchronous stdio channel, no async
+   runtime needed — and the first root becomes the vault's root for resolving relative check paths);
+   a status for memories that carry no checks ("unchecked", see §2.4) distinct from checks that
+   could not run.
 3. **Week 3:** consolidation (dedup, merge) as explicit logged operations; shared vaults with
    per-key trust; `redact` of source events.
 4. **Week 4:** Python eval harness, baselines, benchmarks for staleness and injection, paper skeleton.
