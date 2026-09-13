@@ -132,6 +132,20 @@ pay for a model load.
    cryptographically; deliberately out of scope for now: revocation does not retroactively lower
    trust already recorded under a since-removed key, and there is no remote sync between separate
    copies of a vault).
-4. **Week 4:** Python eval harness, baselines, benchmarks for staleness and injection, paper skeleton.
+4. **Week 4 (done, pilot scale):** Python eval harness (`evals/`), driving the real binary as a
+   black box via its `--json` CLI output, LLM steps via headless `claude -p` (no separate API key
+   needed or configured). H1 staleness: checks drive stale-served-as-fresh from 100% (no-check
+   baseline) to 0%, no false positives (n=10/arm). H2 injection: found and fixed a real gap in the
+   *shipped default* policy (an empty `[policy.channels]` lets `observe --trust user` spoof its
+   way into an instruction; capping the channel at Tool trust "fixes" it by breaking the system's
+   own primary workflow too, capping at Agent instead closes it for free, confirmed by a positive
+   control) -- 1/7 attacks succeed under default, 0/7 once hardened, legitimate preference
+   creation unaffected either way. H3 parity: one real LoCoMo conversation piloted end to end
+   (118 facts extracted, 4/8 questions answered correctly using only `recall`'s output, judged by
+   Claude); LongMemEval's loader is built and its download verified live but not run at pilot
+   scale this session (~277MB, far more `claude -p` volume per instance). H4 reproducibility:
+   100% identical recalls across repeats, a copied vault, and a rebuild (n=3), independently of
+   the Rust-internal property test asserting the same thing. Paper skeleton at
+   `evals/paper/skeleton.md` with these real numbers, explicit about pilot scope throughout.
 5. **Later:** GUI timeline ("what did the agent know at T"), HTTP transport, sampling-based
    extraction through the host.
