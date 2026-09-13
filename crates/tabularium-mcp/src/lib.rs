@@ -240,7 +240,7 @@ pub fn tool_definitions() -> Vec<Value> {
         }),
         json!({
             "name": "memory_info",
-            "description": "Vault location, project root, ledger head, counts and public key.",
+            "description": "Vault location, project root, ledger head, counts, public key, and this session's writer identity (if any) with its registered name.",
             "inputSchema": {"type": "object", "properties": {}}
         }),
     ]
@@ -537,6 +537,10 @@ impl McpServer {
                     }
                     None => json!({"model": null, "covered": 0, "active": active}),
                 };
+                let writer = self.vault.writer_public_key_hex().map(|pk| {
+                    let name = self.vault.config().policy.writers.get(&pk).map(|w| w.name.clone());
+                    json!({"public_key": pk, "registered_name": name})
+                });
                 Ok(json!({
                     "vault": self.vault.dir().display().to_string(),
                     "root": self.vault.root().display().to_string(),
@@ -546,6 +550,7 @@ impl McpServer {
                     "memories": {"active": active, "total": total},
                     "embeddings": embeddings,
                     "public_key": self.vault.public_key_hex(),
+                    "writer": writer,
                     "channel": self.channel,
                     "protocol": self.protocol,
                     "version": SERVER_VERSION,
@@ -745,6 +750,23 @@ mod tests {
         assert_eq!(merged["isError"], false, "{merged:?}");
         let after = call(&mut s, 22, "memory_duplicates", json!({}));
         assert!(after["structuredContent"]["pairs"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn memory_info_surfaces_writer_identity() {
+        let (_d, mut s) = server();
+        let none = call(&mut s, 1, "memory_info", json!({}));
+        assert!(none["structuredContent"]["writer"].is_null());
+
+        let writer = tabularium_core::keys::VaultKeys::generate().unwrap();
+        let pubkey = writer.public_key_hex();
+        s.vault_mut().config_mut().policy.writers.insert(pubkey.clone(), WriterPolicy { name: "daniil".into(), max_trust: Trust::User });
+        s.vault_mut().save_config().unwrap();
+        s.vault_mut().set_writer_identity(Some(writer));
+
+        let with_writer = call(&mut s, 2, "memory_info", json!({}));
+        assert_eq!(with_writer["structuredContent"]["writer"]["public_key"], pubkey);
+        assert_eq!(with_writer["structuredContent"]["writer"]["registered_name"], "daniil");
     }
 
     #[test]

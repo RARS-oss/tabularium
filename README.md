@@ -11,6 +11,7 @@ noticing, they can be poisoned by anything the agent reads, and nobody can repro
 |---|---|
 | **Never lies silently** | Every memory carries evidence ids and validity checks (file hash, symbol present, TTL). Checks are re-run at recall time; a memory whose world has changed comes back marked `stale`, with the reason. |
 | **Cannot be poisoned into instructions** | Trust is attached at ingestion (`external < tool < agent < user`) and never rises. A memory's trust is the weakest of its evidence. `preference` and `instruction` memories are rejected unless every piece of evidence is a user utterance. Enforced by construction, tested by fuzzing. |
+| **Shared vaults, per-key trust** | A vault isn't limited to one writer. Each writer signs events with its own identity key (`tabularium identity`); the vault owner registers which keys may write and at what trust ceiling (`tabularium writer`) — an unregistered key caps at `external`, verified by `audit`, not just trusted by convention. |
 | **Reproducible** | The only source of truth is an append-only, hash-chained, Ed25519-signed event ledger. The memory view is a pure function of it: incremental compilation and a full rebuild are byte-identical, and tests assert it. Recall uses exact BM25 plus exact cosine over vectors that are computed once and stored in the ledger, fused by reciprocal rank with fixed tie-breaks. |
 | **Cross-language** | A multilingual embedding model runs locally through ONNX (statically linked, downloaded once to `~/.tabularium/models`). Ask in Russian, find what was saved in English. Without the model the engine degrades to lexical recall and says so. |
 | **Budgeted and explainable** | Recall packs memories under a token budget and tells you why each item ranked where it did. |
@@ -68,6 +69,19 @@ tabularium embed               # write vectors for memories that have none (firs
 Embeddings are on by default (`[embeddings]` in `vault.toml`: `enabled`, `model`, `threshold`, `cache_dir`).
 Set `TABULARIUM_NO_EMBED=1` to force lexical-only for a process; hooks always run lexical-only.
 
+### Sharing a vault between writers
+
+```sh
+tabularium identity init                          # ~/.tabularium/identity, reusable across vaults
+tabularium identity show                           # hand this public key to the vault owner
+tabularium writer add <pubkey> --name daniil --max-trust user   # vault owner registers it
+tabularium writer list
+tabularium --identity ~/.tabularium/identity observe --kind utterance "..."  # now signs as that writer
+```
+
+An unregistered writer key can still write, capped at `external` trust, so onboarding a new writer
+never requires touching the vault first. `tabularium audit` verifies every writer signature.
+
 ## Guarantees under test
 
 - `cargo test` runs unit, integration and property tests (proptest):
@@ -76,6 +90,8 @@ Set `TABULARIUM_NO_EMBED=1` to force lexical-only for a process; hooks always ru
   - **redaction**: forgetting a memory redacts its text, its vector, and any evidence event no
     longer cited by another active memory, and the chain still audits;
   - **integrity**: any altered byte in the ledger fails `audit`; the SQLite triggers make the table append-only;
+  - **per-key trust**: a registered writer's trust ceiling is enforced regardless of channel; an
+    unregistered key caps at `external`; a tampered writer signature fails `audit`;
   - **budget**: recall never exceeds its token budget.
 
 ## Layout
@@ -91,7 +107,8 @@ evals/                   benchmark harness (Python), coming
 
 ## Status
 
-v0.2: core plus stored embeddings and hybrid recall. See `docs/DESIGN.md` for the roadmap: consolidation,
-git-aware checks, shared vaults with per-key trust, GUI timeline.
+v0.2: core, stored embeddings and hybrid recall, contradiction and duplicate detection, explicit merge,
+evidence redaction, and shared vaults with per-key trust. See `docs/DESIGN.md` for the roadmap: a
+Python eval harness and benchmarks next (Week 4), then a GUI timeline further out.
 
 License: MIT OR Apache-2.0.

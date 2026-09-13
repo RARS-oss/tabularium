@@ -105,7 +105,7 @@ pay for a model load.
    runtime needed — and the first root becomes the vault's root for resolving relative check paths);
    a status for memories that carry no checks ("unchecked", see §2.4) distinct from checks that
    could not run.
-3. **Week 3 (in progress):** `redact` of source events (done — `forget` now also redacts any
+3. **Week 3 (done):** `redact` of source events (`forget` now also redacts any
    evidence event that no other *active* memory still cites; an evidence event backing another
    live memory survives, checked directly against the memories view rather than assumed);
    consolidation (done -- detection and merge are separate, composable operations, both explicit
@@ -117,7 +117,21 @@ pay for a model load.
    each id must be an active memory, is auto-folded into `evidence` so trust cannot rise through a
    merge, and is superseded by the new memory exactly like subject supersession, just keyed by id;
    `forget`'s existing undo logic already operates on sets, so undoing a merge reactivates every
-   source with no extra code); shared vaults with per-key trust.
+   source with no extra code); shared vaults with per-key trust (an `identity` is just a `VaultKeys`
+   keypair stored outside any one vault, at `~/.tabularium/identity`, reusable across vaults like an
+   SSH key; a vault's `Policy.writers` is an `authorized_keys`-style registry mapping a public key to
+   a name and a trust ceiling. `append_event` additionally signs the same hash the vault's own key
+   signs — no change to what's hashed, so no chain-format versioning issue — with the active writer
+   identity, and trust is capped at `min(channel cap, writer's registry cap)`; an unregistered writer
+   key caps at `external` rather than failing outright, so onboarding a new writer never requires
+   touching the vault first. `writer_pubkey`/`writer_sig` are nullable columns, added via `ALTER
+   TABLE` for vaults that predate this feature since `CREATE TABLE IF NOT EXISTS` is a no-op on an
+   existing table; the append-only trigger's column list is rebuilt on every `open()` rather than
+   guarded by `IF NOT EXISTS`, since that would have silently kept the old trigger — missing the new
+   columns' equality check — on any vault migrated this way. `audit` verifies writer signatures
+   cryptographically; deliberately out of scope for now: revocation does not retroactively lower
+   trust already recorded under a since-removed key, and there is no remote sync between separate
+   copies of a vault).
 4. **Week 4:** Python eval harness, baselines, benchmarks for staleness and injection, paper skeleton.
 5. **Later:** GUI timeline ("what did the agent know at T"), HTTP transport, sampling-based
    extraction through the host.

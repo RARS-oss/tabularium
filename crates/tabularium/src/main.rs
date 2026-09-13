@@ -613,12 +613,16 @@ fn main() -> Result<()> {
             let enabled = v.config().embeddings.enabled;
             let stored_model = format!("fastembed:{}", cfg_model.to_ascii_lowercase());
             let (covered, _) = v.embedding_coverage(&stored_model)?;
+            let writer_pk = v.writer_public_key_hex();
+            let writer_name = writer_pk.as_ref().and_then(|pk| v.config().policy.writers.get(pk)).map(|w| w.name.clone());
             if cli.json {
                 print_json(&serde_json::json!({
                     "vault": v.dir(), "root": v.root(), "name": v.config().name, "events": v.event_count()?,
                     "head": {"seq": seq, "hash": hash}, "memories": {"active": a, "total": t},
                     "embeddings": {"enabled": enabled, "model": cfg_model, "covered": covered, "active": a},
-                    "public_key": v.public_key_hex(), "version": tabularium_core::VERSION
+                    "public_key": v.public_key_hex(),
+                    "writer": writer_pk.as_ref().map(|pk| serde_json::json!({"public_key": pk, "registered_name": writer_name})),
+                    "version": tabularium_core::VERSION
                 }))?;
             } else {
                 println!("vault     {}", v.dir().display());
@@ -630,6 +634,11 @@ fn main() -> Result<()> {
                     if enabled { "" } else { " (disabled)" }
                 );
                 println!("pubkey    {}", v.public_key_hex());
+                match (&writer_pk, &writer_name) {
+                    (Some(pk), Some(name)) => println!("writer    {pk} ('{name}')"),
+                    (Some(pk), None) => println!("writer    {pk} (unregistered -- capped at external)"),
+                    (None, _) => println!("writer    none (vault key signs alone)"),
+                }
             }
         }
         Cmd::Serve => {
