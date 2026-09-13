@@ -51,8 +51,12 @@ text), so non-determinism is quarantined in the log.
 ### 2.4 Verify
 Memories carry declarative **checks**: `file_exists`, `file_hash` (BLAKE3 baked at remember time),
 `symbol_in_file`, `ttl`. At recall, checks run against the real filesystem/clock and fold into a status:
-`fresh` (all pass), `stale` (any fail), `unverified` (no checks, or a check errored). Stale memories are
-demoted and annotated with the reason, not hidden: the agent learns *that* the world changed.
+`fresh` (all pass), `unchecked` (the memory carries no checks at all — it never claimed to be
+verifiable), `unverified` (checks exist but errored rather than passing or failing, or verification
+was skipped for this call), `stale` (any check failed). Stale memories are demoted and annotated
+with the reason, not hidden: the agent learns *that* the world changed. `unchecked` and `unverified`
+carry the same score weight today (0.9) — the split is about telling a reader the two situations
+apart, not yet a calibrated claim that one deserves more trust than the other.
 
 ### 2.5 Recall
 Two exact rankings over active memories, no approximate index:
@@ -96,7 +100,7 @@ pay for a model load.
    record file reads as evidence (done — the existing `PostToolUse` hook already keyed off
    `tool_input.file_path`, generic across tools; the gap was the shipped matcher excluding `Read`,
    now `Read|Edit|Write|MultiEdit`); `roots` support in MCP; a status for memories that carry no
-   checks ("unchecked") distinct from checks that could not run.
+   checks ("unchecked", done — see §2.4) distinct from checks that could not run.
 3. **Week 3:** consolidation (dedup, merge) as explicit logged operations; shared vaults with
    per-key trust; `redact` of source events.
 4. **Week 4:** Python eval harness, baselines, benchmarks for staleness and injection, paper skeleton.

@@ -102,6 +102,10 @@ pub struct HintResult {
 pub fn status_factor(s: Status) -> f64 {
     match s {
         Status::Fresh => 1.0,
+        // Same weight for now: splitting the taxonomy is about telling these two situations
+        // apart for a reader (never claimed to be verifiable vs. verification was inconclusive
+        // or skipped), not yet a calibrated claim that one deserves more trust than the other.
+        Status::Unchecked => 0.9,
         Status::Unverified => 0.9,
         Status::Stale => 0.5,
     }
@@ -378,7 +382,7 @@ impl Vault {
                 "version": POLICY_VERSION,
                 "bm25": {"k1": BM25_K1, "b": BM25_B},
                 "semantic": semantic_policy,
-                "status_factor": {"fresh": 1.0, "unverified": 0.9, "stale": 0.5},
+                "status_factor": {"fresh": 1.0, "unchecked": 0.9, "unverified": 0.9, "stale": 0.5},
                 "trust_factor": {"user": 1.0, "agent": 0.95, "tool": 0.9, "external": 0.8},
                 "item_overhead_tokens": ITEM_OVERHEAD_TOKENS,
                 "verify": opts.verify,

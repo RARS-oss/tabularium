@@ -291,18 +291,22 @@ impl Memory {
 pub enum Status {
     /// All checks passed.
     Fresh,
+    /// The memory carries no checks at all: it never claimed to be verifiable.
+    Unchecked,
+    /// Verification was skipped this call, or a check exists but errored (couldn't run) rather
+    /// than definitively passing or failing.
+    Unverified,
     /// At least one check failed: the world changed since this was remembered.
     Stale,
-    /// No checks, or a check could not be run.
-    Unverified,
 }
 
 impl Status {
     pub fn as_str(self) -> &'static str {
         match self {
             Status::Fresh => "fresh",
-            Status::Stale => "stale",
+            Status::Unchecked => "unchecked",
             Status::Unverified => "unverified",
+            Status::Stale => "stale",
         }
     }
 }

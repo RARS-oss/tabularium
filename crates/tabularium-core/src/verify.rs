@@ -79,7 +79,7 @@ pub fn run_check(root: &Path, check: &Check, now: &chrono::DateTime<chrono::Utc>
 /// Run all checks of a memory and fold them into a status.
 pub fn run_checks(root: &Path, checks: &[Check], now: &chrono::DateTime<chrono::Utc>) -> (Status, Vec<CheckResult>) {
     if checks.is_empty() {
-        return (Status::Unverified, Vec::new());
+        return (Status::Unchecked, Vec::new());
     }
     let results: Vec<CheckResult> = checks
         .iter()
@@ -91,7 +91,7 @@ pub fn run_checks(root: &Path, checks: &[Check], now: &chrono::DateTime<chrono::
 
 pub fn fold_status(results: &[CheckResult]) -> Status {
     if results.is_empty() {
-        return Status::Unverified;
+        return Status::Unchecked;
     }
     let mut any_error = false;
     for r in results {
@@ -153,6 +153,17 @@ mod tests {
         let future = Check::Ttl { expires: "2999-01-01T00:00:00Z".into() };
         assert!(matches!(run_check(dir.path(), &past, &now), CheckOutcome::Fail { .. }));
         assert_eq!(run_check(dir.path(), &future, &now), CheckOutcome::Pass);
-        assert_eq!(run_checks(dir.path(), &[], &now).0, Status::Unverified);
+        assert_eq!(run_checks(dir.path(), &[], &now).0, Status::Unchecked, "no checks at all is unchecked, not unverified");
+    }
+
+    #[test]
+    fn errored_check_is_unverified_not_unchecked() {
+        let dir = tempfile::tempdir().unwrap();
+        let now = chrono::Utc::now();
+        // FileHash with no baked baseline hash errors rather than passing or failing.
+        let unbaked = Check::FileHash { path: "missing.txt".into(), blake3: None };
+        let (status, results) = run_checks(dir.path(), &[unbaked], &now);
+        assert_eq!(status, Status::Unverified, "a check that exists but couldn't run is unverified, not unchecked");
+        assert!(matches!(results[0].outcome, CheckOutcome::Error { .. }));
     }
 }

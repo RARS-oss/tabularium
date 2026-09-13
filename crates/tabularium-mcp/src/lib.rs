@@ -137,7 +137,7 @@ pub fn tool_definitions() -> Vec<Value> {
         }),
         json!({
             "name": "memory_recall",
-            "description": "Retrieve relevant memories under a token budget. Each item carries trust, a verification status (fresh/stale/unverified) and a 'why' explaining its rank. Stale items describe something that changed since they were saved. Returns a signed receipt id.",
+            "description": "Retrieve relevant memories under a token budget. Each item carries trust, a verification status (fresh/unchecked/unverified/stale) and a 'why' explaining its rank. Stale items describe something that changed since they were saved; unchecked means the memory carries no checks at all. Returns a signed receipt id.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -164,7 +164,7 @@ pub fn tool_definitions() -> Vec<Value> {
         }),
         json!({
             "name": "memory_verify",
-            "description": "Run validity checks on one memory (or all active memories) and report fresh/stale/unverified with reasons.",
+            "description": "Run validity checks on one memory (or all active memories) and report fresh/unchecked/unverified/stale with reasons.",
             "inputSchema": {
                 "type": "object",
                 "properties": {"memory_id": {"type": "string"}}
